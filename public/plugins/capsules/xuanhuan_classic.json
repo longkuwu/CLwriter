@@ -1,0 +1,40 @@
+{
+    "id": "xuanhuan_classic",
+    "name": "经典玄幻",
+    "description": "传统玄幻小说风格，修炼升级打怪",
+    "category": "玄幻",
+    "author": "IP Architect",
+    "version": "1.0.0",
+    "style_prompt": "你是一个擅长写经典玄幻小说的作者。文风特点：\n1. 注重修炼境界体系的描写\n2. 战斗场面要有画面感和冲击力\n3. 装逼打脸情节要合理铺垫\n4. 适当加入幽默元素调节节奏\n5. 功法、丹药、法宝等设定要有新意\n6. 主角成长要有明确的阶段感",
+    "rhythm_rules": {
+        "chapter_structure": {
+            "opening": "悬念或冲突引入",
+            "development": "修炼或探索",
+            "climax": "战斗或突破",
+            "ending": "收获或新悬念"
+        },
+        "pacing": {
+            "tension_curve": "张弛有度，紧三章松一章",
+            "power_growth": "小高潮每3-5章，大突破每15-20章",
+            "worldbuilding": "边走边展开，不堆砌设定"
+        },
+        "dialogue_ratio": "30%-40%对话",
+        "cliffhanger": "境界突破、强敌出现、宝物线索"
+    },
+    "character_templates": {
+        "protagonist": {
+            "archetype": "天才型或逆袭型",
+            "traits": [
+                "坚韧",
+                "机智",
+                "有底线"
+            ],
+            "growth_arc": "从弱小到巅峰"
+        }
+    },
+    "sample_prompts": {
+        "cultivation": "写一段主角闭关突破的场景",
+        "battle": "写一场以弱胜强的战斗",
+        "treasure": "写主角意外获得神秘传承"
+    }
+}

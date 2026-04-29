@@ -1,0 +1,11 @@
+{
+    "id": "test_1",
+    "name": "知乎·高爽复仇",
+    "category": "测试",
+    "description": "用短句，快节奏，多反转，强调打脸爽感。",
+    "style_prompt": "用短句，快节奏，多反转，强调打脸爽感。",
+    "rhythm_rules": {
+        "dialogue_ratio": "high",
+        "paragraph_length": "short"
+    }
+}

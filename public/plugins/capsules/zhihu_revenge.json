@@ -1,0 +1,49 @@
+{
+    "id": "zhihu_revenge",
+    "name": "知乎复仇文",
+    "description": "典型的知乎爽文复仇套路，主角逆袭打脸",
+    "category": "都市",
+    "author": "IP Architect",
+    "version": "1.0.0",
+    "style_prompt": "你是一个擅长写知乎风格复仇爽文的作者。文风特点：\n1. 开篇即冲突，快速建立矛盾\n2. 主角前期隐忍蛰伏，积蓄力量\n3. 反派嚣张跋扈，态度轻蔑\n4. 逆转时刻要有强烈的视觉冲击感\n5. 打脸场景要有围观群众的反应烘托\n6. 语言简洁有力，多用短句增强节奏感\n7. 适时插入内心独白，展现主角的隐忍与爆发",
+    "rhythm_rules": {
+        "chapter_structure": {
+            "opening": "冲突引入，30%篇幅",
+            "development": "压抑积累，40%篇幅",
+            "climax": "爆发逆转，20%篇幅",
+            "ending": "打脸收尾，10%篇幅"
+        },
+        "pacing": {
+            "tension_curve": "低开-持续压抑-急剧爆发-满足收尾",
+            "sentence_rhythm": "压抑时用长句，爆发时用短句",
+            "scene_switch": "每1500字左右切换场景或视角"
+        },
+        "dialogue_ratio": "40%-50%对话，保持快节奏",
+        "cliffhanger": "每章结尾留悬念或反转"
+    },
+    "character_templates": {
+        "protagonist": {
+            "archetype": "隐忍型逆袭者",
+            "traits": [
+                "内敛",
+                "有城府",
+                "实力深藏不露"
+            ],
+            "growth_arc": "从被轻视到令人敬畏"
+        },
+        "antagonist": {
+            "archetype": "嚣张型反派",
+            "traits": [
+                "狂妄",
+                "目中无人",
+                "欺软怕硬"
+            ],
+            "fate": "被彻底打脸，身败名裂"
+        }
+    },
+    "sample_prompts": {
+        "opening": "写一个开场：主角参加同学聚会，被曾经的同学嘲笑混得差",
+        "reversal": "写一个逆转场景：反派发现主角的真实身份，态度巨变",
+        "face_slap": "写一个打脸场景：主角当众揭露反派的丑事"
+    }
+}
