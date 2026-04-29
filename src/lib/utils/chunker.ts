@@ -1,326 +1,278 @@
 /**
- * Chunker - 长文本切分工具
+ * 文本分块工具
  * 
- * 智能切分长文本，保持章节完整性
- * 支持 10万字+ 超长文本处理
+ * 用于处理超长文本，支持：
+ * - 智能分块
+ * - 文件读取
+ * - 元数据提取
  */
+
+import {
+    DEFAULT_CHUNK_SIZE,
+    CHUNK_OVERLAP,
+    AVERAGE_CHAPTER_LENGTH,
+    LONG_TEXT_THRESHOLD,
+    MEGA_TEXT_THRESHOLD,
+    SUPPORTED_FILE_TYPES,
+    MAX_FILE_SIZE
+} from '../constants'
+
+// ========== 类型定义 ==========
+
+export interface TextChunk {
+    index: number
+    content: string
+    startPos: number
+    endPos: number
+}
 
 export interface ChunkResult {
     chunks: TextChunk[]
     metadata: TextMetadata
 }
 
-export interface TextChunk {
-    index: number
-    content: string
-    wordCount: number
-    title?: string  // 章节标题（如果检测到）
-}
-
 export interface TextMetadata {
-    totalWordCount: number
+    totalLength: number
     totalChunks: number
     estimatedChapters: number
-    averageChunkSize: number
-    isLongContent: boolean  // > 20000 字
+    isLongContent: boolean
+    isMegaContent: boolean
 }
 
-// 章节标题正则（支持多种格式）
-const CHAPTER_PATTERNS = [
-    /^第[一二三四五六七八九十百千\d]+章\s*.*/gm,          // 第X章
-    /^第[一二三四五六七八九十百千\d]+节\s*.*/gm,          // 第X节
-    /^Chapter\s*\d+/gim,                                  // Chapter X
-    /^[【\[]\d+[】\]]/gm,                                  // 【1】 或 [1]
-    /^Part\s*\d+/gim,                                      // Part X
-    /^\d+[\.、]\s*.+/gm,                                   // 1. 或 1、
-]
-
-// 分段符号
-const PARAGRAPH_SEPARATORS = ['\n\n', '\r\n\r\n', '\n', '\r\n']
+// ========== 文本分块 ==========
 
 /**
- * 智能切分长文本
- * 
+ * 将长文本分块
  * @param text 原始文本
- * @param targetChunkSize 目标块大小（字符数）
- * @returns 切分结果
+ * @param chunkSize 每块大小（默认 5000 字）
+ * @param overlap 重叠大小（默认 500 字）
+ * @returns 分块结果
  */
 export function chunkText(
     text: string,
-    targetChunkSize: number = 4000
+    chunkSize: number = DEFAULT_CHUNK_SIZE,
+    overlap: number = CHUNK_OVERLAP
 ): ChunkResult {
-    const totalWordCount = text.length
-    const isLongContent = totalWordCount > 20000
-
-    // 短文本直接返回
-    if (totalWordCount <= targetChunkSize) {
-        return {
-            chunks: [{
-                index: 0,
-                content: text,
-                wordCount: totalWordCount
-            }],
-            metadata: {
-                totalWordCount,
-                totalChunks: 1,
-                estimatedChapters: estimateChapterCount(text),
-                averageChunkSize: totalWordCount,
-                isLongContent
-            }
-        }
-    }
-
-    // 尝试按章节切分
-    const chapters = splitByChapters(text)
-
-    if (chapters.length > 1) {
-        // 有章节结构，按章节分块
-        const chunks = mergeChaptersToChunks(chapters, targetChunkSize)
-        return {
-            chunks,
-            metadata: {
-                totalWordCount,
-                totalChunks: chunks.length,
-                estimatedChapters: chapters.length,
-                averageChunkSize: Math.round(totalWordCount / chunks.length),
-                isLongContent
-            }
-        }
-    }
-
-    // 无章节结构，按段落切分
-    const paragraphs = splitByParagraphs(text)
-    const chunks = mergeParagraphsToChunks(paragraphs, targetChunkSize)
-
-    return {
-        chunks,
-        metadata: {
-            totalWordCount,
-            totalChunks: chunks.length,
-            estimatedChapters: 1,
-            averageChunkSize: Math.round(totalWordCount / chunks.length),
-            isLongContent
-        }
-    }
-}
-
-/**
- * 按章节切分
- */
-function splitByChapters(text: string): string[] {
-    // 合并所有章节模式
-    let allMatches: { index: number; match: string }[] = []
-
-    for (const pattern of CHAPTER_PATTERNS) {
-        const regex = new RegExp(pattern.source, pattern.flags)
-        let match
-        while ((match = regex.exec(text)) !== null) {
-            allMatches.push({ index: match.index, match: match[0] })
-        }
-    }
-
-    if (allMatches.length === 0) {
-        return [text]
-    }
-
-    // 按位置排序
-    allMatches.sort((a, b) => a.index - b.index)
-
-    // 去重（相同位置的匹配只保留一个）
-    allMatches = allMatches.filter((item, index, arr) =>
-        index === 0 || item.index !== arr[index - 1].index
-    )
-
-    // 切分
-    const chapters: string[] = []
-    for (let i = 0; i < allMatches.length; i++) {
-        const start = allMatches[i].index
-        const end = i + 1 < allMatches.length ? allMatches[i + 1].index : text.length
-        const chapter = text.slice(start, end).trim()
-        if (chapter.length > 0) {
-            chapters.push(chapter)
-        }
-    }
-
-    // 如果第一个章节标题不在开头，保留开头部分
-    if (allMatches.length > 0 && allMatches[0].index > 100) {
-        const prologue = text.slice(0, allMatches[0].index).trim()
-        if (prologue.length > 100) {
-            chapters.unshift(prologue)
-        }
-    }
-
-    return chapters
-}
-
-/**
- * 按段落切分
- */
-function splitByParagraphs(text: string): string[] {
-    for (const separator of PARAGRAPH_SEPARATORS) {
-        const parts = text.split(separator).filter(p => p.trim().length > 0)
-        if (parts.length > 1) {
-            return parts
-        }
-    }
-    return [text]
-}
-
-/**
- * 合并章节为块（保持单章完整性）
- */
-function mergeChaptersToChunks(
-    chapters: string[],
-    targetSize: number
-): TextChunk[] {
     const chunks: TextChunk[] = []
-    let currentContent = ''
-    let chunkIndex = 0
+    const totalLength = text.length
 
-    for (const chapter of chapters) {
-        if (chapter.length > targetSize) {
-            // 单章太长，需要进一步切分
-            if (currentContent.length > 0) {
-                chunks.push({
-                    index: chunkIndex++,
-                    content: currentContent.trim(),
-                    wordCount: currentContent.length,
-                    title: extractChapterTitle(currentContent)
-                })
-                currentContent = ''
-            }
-
-            // 按段落切分长章节
-            const paragraphs = splitByParagraphs(chapter)
-            const subChunks = mergeParagraphsToChunks(paragraphs, targetSize)
-            for (const subChunk of subChunks) {
-                subChunk.index = chunkIndex++
-                chunks.push(subChunk)
-            }
-        } else if (currentContent.length + chapter.length > targetSize) {
-            // 当前块已满，开始新块
-            if (currentContent.length > 0) {
-                chunks.push({
-                    index: chunkIndex++,
-                    content: currentContent.trim(),
-                    wordCount: currentContent.length,
-                    title: extractChapterTitle(currentContent)
-                })
-            }
-            currentContent = chapter
-        } else {
-            // 继续累积
-            currentContent += '\n\n' + chapter
-        }
-    }
-
-    // 处理剩余内容
-    if (currentContent.trim().length > 0) {
+    // 如果文本很短，不需要分块
+    if (totalLength <= chunkSize) {
         chunks.push({
-            index: chunkIndex,
-            content: currentContent.trim(),
-            wordCount: currentContent.length,
-            title: extractChapterTitle(currentContent)
+            index: 0,
+            content: text,
+            startPos: 0,
+            endPos: totalLength
         })
+    } else {
+        // 分块处理
+        let startPos = 0
+        let index = 0
+
+        while (startPos < totalLength) {
+            const endPos = Math.min(startPos + chunkSize, totalLength)
+            const content = text.slice(startPos, endPos)
+
+            chunks.push({
+                index,
+                content,
+                startPos,
+                endPos
+            })
+
+            // 下一块的起始位置（考虑重叠）
+            startPos = endPos - overlap
+            index++
+
+            // 防止无限循环
+            if (startPos >= totalLength - overlap) {
+                break
+            }
+        }
     }
 
-    return chunks
+    // 生成元数据
+    const metadata: TextMetadata = {
+        totalLength,
+        totalChunks: chunks.length,
+        estimatedChapters: Math.ceil(totalLength / AVERAGE_CHAPTER_LENGTH),
+        isLongContent: totalLength >= LONG_TEXT_THRESHOLD,
+        isMegaContent: totalLength >= MEGA_TEXT_THRESHOLD
+    }
+
+    return { chunks, metadata }
 }
 
 /**
- * 合并段落为块
+ * 智能分块（按段落边界）
+ * 尽量在段落结束处分块，保持语义完整性
  */
-function mergeParagraphsToChunks(
-    paragraphs: string[],
-    targetSize: number
-): TextChunk[] {
+export function smartChunkText(
+    text: string,
+    targetChunkSize: number = DEFAULT_CHUNK_SIZE
+): ChunkResult {
     const chunks: TextChunk[] = []
-    let currentContent = ''
-    let chunkIndex = 0
+    const paragraphs = text.split(/\n\n+/)  // 按空行分段
+
+    let currentChunk = ''
+    let currentStartPos = 0
+    let index = 0
 
     for (const paragraph of paragraphs) {
-        if (currentContent.length + paragraph.length > targetSize) {
-            if (currentContent.length > 0) {
-                chunks.push({
-                    index: chunkIndex++,
-                    content: currentContent.trim(),
-                    wordCount: currentContent.length
-                })
-            }
-            currentContent = paragraph
-        } else {
-            currentContent += '\n\n' + paragraph
+        // 如果当前块 + 新段落超过目标大小，保存当前块
+        if (currentChunk.length + paragraph.length > targetChunkSize && currentChunk.length > 0) {
+            chunks.push({
+                index,
+                content: currentChunk.trim(),
+                startPos: currentStartPos,
+                endPos: currentStartPos + currentChunk.length
+            })
+
+            currentStartPos += currentChunk.length
+            currentChunk = ''
+            index++
         }
+
+        currentChunk += paragraph + '\n\n'
     }
 
-    if (currentContent.trim().length > 0) {
+    // 保存最后一块
+    if (currentChunk.trim().length > 0) {
         chunks.push({
-            index: chunkIndex,
-            content: currentContent.trim(),
-            wordCount: currentContent.length
+            index,
+            content: currentChunk.trim(),
+            startPos: currentStartPos,
+            endPos: currentStartPos + currentChunk.length
         })
     }
 
-    return chunks
-}
-
-/**
- * 提取章节标题
- */
-function extractChapterTitle(content: string): string | undefined {
-    const firstLine = content.split('\n')[0].trim()
-    for (const pattern of CHAPTER_PATTERNS) {
-        if (pattern.test(firstLine)) {
-            return firstLine.slice(0, 50)
-        }
+    const metadata: TextMetadata = {
+        totalLength: text.length,
+        totalChunks: chunks.length,
+        estimatedChapters: Math.ceil(text.length / AVERAGE_CHAPTER_LENGTH),
+        isLongContent: text.length >= LONG_TEXT_THRESHOLD,
+        isMegaContent: text.length >= MEGA_TEXT_THRESHOLD
     }
-    return undefined
+
+    return { chunks, metadata }
 }
 
-/**
- * 估算章节数
- */
-function estimateChapterCount(text: string): number {
-    let count = 0
-    for (const pattern of CHAPTER_PATTERNS) {
-        const matches = text.match(new RegExp(pattern.source, pattern.flags))
-        if (matches) {
-            count = Math.max(count, matches.length)
-        }
-    }
-    return Math.max(1, count)
-}
+// ========== 文件读取 ==========
 
 /**
- * 读取上传文件内容
+ * 读取文件内容
+ * @param file File 对象
+ * @returns 文件文本内容
  */
 export async function readFileContent(file: File): Promise<string> {
-    const extension = file.name.split('.').pop()?.toLowerCase()
+    // 检查文件类型
+    const fileExt = '.' + file.name.split('.').pop()?.toLowerCase()
+    if (!SUPPORTED_FILE_TYPES.includes(fileExt)) {
+        throw new Error(`不支持的文件类型: ${fileExt}。支持的类型: ${SUPPORTED_FILE_TYPES.join(', ')}`)
+    }
 
-    switch (extension) {
-        case 'txt':
-        case 'md':
-            return await file.text()
+    // 检查文件大小
+    if (file.size > MAX_FILE_SIZE) {
+        throw new Error(`文件过大: ${formatFileSize(file.size)}。最大支持: ${formatFileSize(MAX_FILE_SIZE)}`)
+    }
 
-        case 'docx':
-            // TODO: 需要额外库支持
-            throw new Error('DOCX 文件支持即将推出')
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader()
 
-        case 'epub':
-            // TODO: 需要额外库支持
-            throw new Error('EPUB 文件支持即将推出')
+        reader.onload = (e) => {
+            const content = e.target?.result as string
+            resolve(content)
+        }
 
-        default:
-            throw new Error(`不支持的文件格式: ${extension}`)
+        reader.onerror = () => {
+            reject(new Error('文件读取失败'))
+        }
+
+        reader.readAsText(file, 'UTF-8')
+    })
+}
+
+// ========== 格式化工具 ==========
+
+/**
+ * 格式化文件大小
+ */
+export function formatFileSize(bytes: number): string {
+    if (bytes < 1024) {
+        return `${bytes} B`
+    } else if (bytes < 1024 * 1024) {
+        return `${(bytes / 1024).toFixed(1)} KB`
+    } else {
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
     }
 }
 
 /**
- * 格式化字数显示
+ * 格式化字数
  */
 export function formatWordCount(count: number): string {
-    if (count >= 10000) {
+    if (count < 10000) {
+        return `${count.toLocaleString()} 字`
+    } else {
         return `${(count / 10000).toFixed(1)} 万字`
     }
-    return `${count} 字`
+}
+
+/**
+ * 估算阅读时间（分钟）
+ * 假设阅读速度：300 字/分钟
+ */
+export function estimateReadingTime(wordCount: number): number {
+    const READING_SPEED = 300  // 字/分钟
+    return Math.ceil(wordCount / READING_SPEED)
+}
+
+// ========== 文本分析 ==========
+
+/**
+ * 提取文本摘要（前 N 个字）
+ */
+export function extractSummary(text: string, maxLength: number = 200): string {
+    if (text.length <= maxLength) {
+        return text
+    }
+    return text.slice(0, maxLength) + '...'
+}
+
+/**
+ * 统计段落数
+ */
+export function countParagraphs(text: string): number {
+    return text.split(/\n\n+/).filter(p => p.trim().length > 0).length
+}
+
+/**
+ * 统计句子数（简单实现）
+ */
+export function countSentences(text: string): number {
+    return text.split(/[。！？.!?]+/).filter(s => s.trim().length > 0).length
+}
+
+/**
+ * 计算文本密度（字符/段落）
+ */
+export function calculateTextDensity(text: string): number {
+    const paragraphs = countParagraphs(text)
+    if (paragraphs === 0) return 0
+    return Math.round(text.length / paragraphs)
+}
+
+// ========== 导出 ==========
+
+export default {
+    chunkText,
+    smartChunkText,
+    readFileContent,
+    formatFileSize,
+    formatWordCount,
+    estimateReadingTime,
+    extractSummary,
+    countParagraphs,
+    countSentences,
+    calculateTextDensity
 }
