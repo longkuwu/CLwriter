@@ -11,12 +11,14 @@ import {
     Heart,
     MapPin,
     Package,
-    Sparkles
+    Sparkles,
+    Cpu
 } from 'lucide-react'
 import { useNovelState } from '@/lib/novel-state'
 import { cn } from '@/lib/utils'
 import EntitySuggestion from '@/components/editor/EntitySuggestion'
 import WorldStatePanel from '@/components/sidebar/WorldStatePanel'
+import EnginePanel from '@/components/engine/EnginePanel'
 
 // Codex 状态组件 - 可视化面板
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -190,8 +192,10 @@ interface RightSidebarProps {
 }
 
 export default function RightSidebar({ isCollapsed, onToggle }: RightSidebarProps) {
+    const [view, setView] = useState<'classic' | 'engine'>('engine')
+
     return (
-        <div className="h-full flex flex-col bg-card/50 relative overflow-auto">
+        <div className="h-full flex flex-col bg-card/50 relative overflow-hidden">
             {/* 折叠按钮 */}
             <button
                 onClick={onToggle}
@@ -205,16 +209,53 @@ export default function RightSidebar({ isCollapsed, onToggle }: RightSidebarProp
             </button>
 
             {!isCollapsed && (
-                <div className="p-4 space-y-4 overflow-auto">
-                    {/* 🌍 世界状态面板（使用新的 store） */}
-                    <WorldStatePanel />
+                <>
+                    {/* View 切换 */}
+                    <div className="flex border-b border-border/30 bg-card">
+                        <button
+                            onClick={() => setView('engine')}
+                            className={cn(
+                                'flex-1 py-1.5 text-[11px] flex items-center justify-center gap-1 border-b-2 transition-colors',
+                                view === 'engine'
+                                    ? 'border-primary text-foreground bg-primary/10'
+                                    : 'border-transparent text-muted-foreground hover:bg-accent/30'
+                            )}
+                        >
+                            <Cpu className="h-3 w-3" />
+                            状态引擎
+                        </button>
+                        <button
+                            onClick={() => setView('classic')}
+                            className={cn(
+                                'flex-1 py-1.5 text-[11px] flex items-center justify-center gap-1 border-b-2 transition-colors',
+                                view === 'classic'
+                                    ? 'border-primary text-foreground bg-primary/10'
+                                    : 'border-transparent text-muted-foreground hover:bg-accent/30'
+                            )}
+                        >
+                            <BookOpen className="h-3 w-3" />
+                            经典视图
+                        </button>
+                    </div>
 
-                    {/* 🏛️ 实体建议 */}
-                    <EntitySuggestion />
+                    {/* 内容区 */}
+                    <div className="flex-1 overflow-hidden">
+                        {view === 'engine' ? (
+                            <EnginePanel />
+                        ) : (
+                            <div className="p-4 space-y-4 overflow-auto h-full">
+                                {/* 🌍 世界状态面板（使用新的 store） */}
+                                <WorldStatePanel />
 
-                    {/* 🧠 AI 逻辑检查 */}
-                    <AILogicChecker />
-                </div>
+                                {/* 🏛️ 实体建议 */}
+                                <EntitySuggestion />
+
+                                {/* 🧠 AI 逻辑检查 */}
+                                <AILogicChecker />
+                            </div>
+                        )}
+                    </div>
+                </>
             )}
         </div>
     )
