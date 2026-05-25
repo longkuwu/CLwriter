@@ -91,7 +91,7 @@ export async function getUserStyles(): Promise<UserStyle[]> {
             .from(userStyles)
             .orderBy(desc(userStyles.updatedAt))
 
-        return results.map(row => ({
+        return results.map((row: typeof userStyles.$inferSelect): UserStyle => ({
             id: row.id,
             name: row.name,
             coreInstruction: row.coreInstruction,

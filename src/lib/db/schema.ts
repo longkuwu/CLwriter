@@ -226,3 +226,135 @@ export type WorldSettingRecord = typeof worldSettings.$inferSelect
 export type SummaryRecord = typeof summaries.$inferSelect
 export type NewSummaryRecord = typeof summaries.$inferInsert
 
+
+
+// ============================================================
+// v2.0 状态驱动引擎 - 新增表
+// ============================================================
+
+import { jsonb, boolean } from 'drizzle-orm/pg-core'
+
+/**
+ * 事实快照表 - 15 维事实状态
+ * 每章一条记录,记录截止该章的全局状态
+ */
+export const factSnapshots = pgTable('fact_snapshots', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+    chapterId: uuid('chapter_id').references(() => files.id, { onDelete: 'cascade' }),
+    chapterOrder: integer('chapter_order').notNull(),
+
+    // 15 维数据 (全部 JSONB)
+    characterStates: jsonb('character_states').default('[]'),
+    characterLocations: jsonb('character_locations').default('[]'),
+    characterAppearances: jsonb('character_appearances').default('[]'),
+    conflictStates: jsonb('conflict_states').default('[]'),
+    foreshadowStates: jsonb('foreshadow_states').default('[]'),
+    plotNodes: jsonb('plot_nodes').default('[]'),
+    locationStates: jsonb('location_states').default('[]'),
+    factionStates: jsonb('faction_states').default('[]'),
+    timeline: jsonb('timeline').default('[]'),
+    itemStates: jsonb('item_states').default('[]'),
+    worldConstraints: jsonb('world_constraints').default('[]'),
+    locationFeatures: jsonb('location_features').default('[]'),
+    secretStates: jsonb('secret_states').default('[]'),
+    oathStates: jsonb('oath_states').default('[]'),
+    deadlineStates: jsonb('deadline_states').default('[]'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+    projectIdIdx: index('fact_snapshots_project_id_idx').on(table.projectId),
+    chapterOrderIdx: index('fact_snapshots_chapter_order_idx').on(table.projectId, table.chapterOrder),
+}))
+
+/**
+ * 章节变更声明表 - 存储 AI 输出的 CHANGES JSON
+ */
+export const chapterChanges = pgTable('chapter_changes', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+    chapterId: uuid('chapter_id').references(() => files.id, { onDelete: 'cascade' }),
+    chapterOrder: integer('chapter_order').notNull(),
+
+    rawChanges: jsonb('raw_changes').notNull(),     // 完整 CHANGES JSON
+    parseError: text('parse_error'),                 // 解析错误 (若有)
+    gateResults: jsonb('gate_results'),              // 6 道门禁结果
+
+    status: text('status').default('pending'),       // pending/passed/rejected/applied
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+    projectIdIdx: index('chapter_changes_project_id_idx').on(table.projectId),
+    statusIdx: index('chapter_changes_status_idx').on(table.status),
+}))
+
+/**
+ * 实体表 - 角色/地点/势力/物品的设定档案
+ */
+export const entities = pgTable('entities', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+
+    type: text('type').notNull(),                    // character/location/faction/item/foreshadow/oath/deadline/secret/conflict
+    name: text('name').notNull(),
+    archetype: text('archetype'),                    // 原型/分类
+
+    attributes: jsonb('attributes').default('{}'),   // 自由属性
+    rules: jsonb('rules').default('[]'),             // 角色规则约束 (如"张三畏火")
+
+    status: text('status').default('active'),        // active/archived
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+    projectIdIdx: index('entities_project_id_idx').on(table.projectId),
+    typeIdx: index('entities_type_idx').on(table.projectId, table.type),
+    nameIdx: index('entities_name_idx').on(table.projectId, table.name),
+}))
+
+/**
+ * 门禁日志表 - 记录每章 6 道门禁的检查结果
+ */
+export const gateLogs = pgTable('gate_logs', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+    chapterId: uuid('chapter_id').references(() => files.id, { onDelete: 'cascade' }),
+    chapterOrder: integer('chapter_order').notNull(),
+
+    gateName: text('gate_name').notNull(),           // gate1_protocol / gate2_reference / ...
+    passed: boolean('passed').notNull(),
+    errors: jsonb('errors').default('[]'),
+    warnings: jsonb('warnings').default('[]'),
+    triggeredAt: timestamp('triggered_at').defaultNow().notNull(),
+}, (table) => ({
+    projectIdIdx: index('gate_logs_project_id_idx').on(table.projectId),
+    chapterIdx: index('gate_logs_chapter_idx').on(table.chapterId),
+}))
+
+/**
+ * 历史里程碑表 - 跨卷关键事件归档
+ */
+export const milestones = pgTable('milestones', {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id').references(() => projects.id, { onDelete: 'cascade' }).notNull(),
+    chapterOrder: integer('chapter_order').notNull(),
+
+    title: text('title').notNull(),
+    summary: text('summary').notNull(),
+    importance: integer('importance').default(5),   // 1-10
+    relatedEntities: jsonb('related_entities').default('[]'),
+
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+    projectIdIdx: index('milestones_project_id_idx').on(table.projectId),
+}))
+
+// 类型导出
+export type FactSnapshotRecord = typeof factSnapshots.$inferSelect
+export type NewFactSnapshotRecord = typeof factSnapshots.$inferInsert
+export type ChapterChangesRecord = typeof chapterChanges.$inferSelect
+export type EntityRecord = typeof entities.$inferSelect
+export type NewEntityRecord = typeof entities.$inferInsert
+export type GateLogRecord = typeof gateLogs.$inferSelect
+export type MilestoneRecord = typeof milestones.$inferSelect

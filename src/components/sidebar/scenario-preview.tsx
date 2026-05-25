@@ -46,6 +46,7 @@ const typeConfig: Record<PredictionType, {
 function PredictionCard({ prediction }: { prediction: Prediction }) {
     const applyPrediction = useNovelStore((state) => state.applyPrediction)
     const config = typeConfig[prediction.type]
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const Icon = config.icon
 
     const handleClick = () => {

@@ -143,7 +143,6 @@ export async function generateText(options: GenerateTextOptions): Promise<{ text
         model: client(model),
         prompt: options.prompt,
         system: options.system,
-        maxTokens: options.maxTokens || 2048,
         temperature: options.temperature ?? 0.7,
     })
 
@@ -174,7 +173,6 @@ export async function streamText(options: StreamTextOptions) {
         model: client(model),
         prompt: options.prompt,
         system: options.system,
-        maxTokens: options.maxTokens || 2048,
         temperature: options.temperature ?? 0.7,
     })
 

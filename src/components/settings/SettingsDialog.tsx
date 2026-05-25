@@ -22,7 +22,7 @@ import {
     SparklesIcon,
     GlobeIcon
 } from 'lucide-react'
-import { AI_PROVIDERS, type AIProviderKey, getAIConfig, saveAIConfig } from '@/lib/tauri-api'
+import { AI_PROVIDERS, type AIProviderKey, saveAIConfig } from '@/lib/tauri-api'
 
 // localStorage Keys (统一使用 tauri-api 的 keys)
 const STORAGE_KEYS = {

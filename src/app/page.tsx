@@ -1,7 +1,6 @@
 "use client"
 
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { getAllProjects, deleteProject, type ProjectData } from '@/lib/actions/projects'
 import { Plus, BookOpen, Trash2, Castle, Flame } from 'lucide-react'
@@ -9,7 +8,6 @@ import { Button } from '@/components/ui/button'
 import CreateProjectModal from '@/components/dashboard/CreateProjectModal'
 
 export default function DashboardPage() {
-  const router = useRouter()
   const [projects, setProjects] = useState<ProjectData[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [newProjectOpen, setNewProjectOpen] = useState(false)

@@ -294,8 +294,11 @@ export async function semanticSearch(
             .from(embeddings)
             .where(eq(embeddings.novelId, novelId))
 
-        const results = allEmbeddings
-            .map(emb => {
+        type EmbRow = typeof embeddings.$inferSelect
+        type Result = { content: string; score: number; fileId: string | null }
+
+        const results: Result[] = allEmbeddings
+            .map((emb: EmbRow): Result => {
                 const embVector = JSON.parse(emb.embedding || '[]')
                 const score = cosineSimilarity(queryVector, embVector)
                 return {
@@ -304,8 +307,8 @@ export async function semanticSearch(
                     fileId: emb.fileId
                 }
             })
-            .filter(r => r.score > 0)
-            .sort((a, b) => b.score - a.score)
+            .filter((r: Result) => r.score > 0)
+            .sort((a: Result, b: Result) => b.score - a.score)
             .slice(0, topK)
 
         return results

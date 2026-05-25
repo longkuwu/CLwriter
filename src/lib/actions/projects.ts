@@ -65,7 +65,7 @@ export async function getAllProjects(): Promise<ProjectData[]> {
             .from(projects)
             .orderBy(desc(projects.updatedAt))
 
-        return results.map(row => ({
+        return results.map((row: typeof projects.$inferSelect): ProjectData => ({
             ...row,
             engineType: (row.engineType as EngineType) || 'epic'
         }))

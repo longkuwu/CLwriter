@@ -116,7 +116,7 @@ export async function analyzeText(
 
         // Step 1: 智能分块
         onProgress?.('切分文本...', 5)
-        const { chunks, metadata } = smartChunkText(text, 5000)
+        const { chunks } = smartChunkText(text, 5000)
         console.log(`[DeconstructAgent] 切分为 ${chunks.length} 块`)
 
         // Step 2: 逐块分析
@@ -297,9 +297,11 @@ ${beats.length > 5 ? `...还有 ${beats.length - 5} 章` : ''}
 
 // ========== 导出 ==========
 
-export default {
+const deconstructAgentExports = {
     analyzeText,
     extractKeyTurns,
     calculateMoodCurve,
     generateStructureSummary
 }
+
+export default deconstructAgentExports

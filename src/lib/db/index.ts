@@ -16,8 +16,10 @@ import * as schema from './schema'
 
 // 单例模式
 let pgliteInstance: PGlite | null = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let dbInstance: any = null
 let isInitialized = false
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let initPromise: Promise<any> | null = null
 
 /**
@@ -90,6 +92,7 @@ async function execSQL(sql: string) {
     if (!pgliteInstance) return
     try {
         await pgliteInstance.query(sql)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } catch (error: any) {
         // 忽略 "already exists" 错误
         if (error?.message?.includes('already exists')) {

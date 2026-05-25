@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { AlertTriangle, Zap, TrendingUp, Lightbulb } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { quickPacingCheck, getRandomSuggestion } from '@/lib/ai/rhythm-agent'

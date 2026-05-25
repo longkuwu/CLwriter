@@ -146,7 +146,7 @@ export async function generateImitation(
             .join('\n')
 
         // 替换 Prompt 模板
-        let prompt = IMITATION_PROMPT
+        const prompt = IMITATION_PROMPT
             .replace('{STRUCTURE}', structureText)
             .replace('{MOOD_CURVE}', moodText)
             .replace('{TOPIC}', config.topic)

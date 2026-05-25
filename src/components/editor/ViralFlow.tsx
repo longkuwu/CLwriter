@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react'
 import { Zap, Flame, Sparkles, AlertTriangle, Loader2 } from 'lucide-react'
-import { useNovelStore } from '@/lib/store/novel-store'
 import { chatCompletion } from '@/lib/tauri-api'
 
 interface PredictionCard {

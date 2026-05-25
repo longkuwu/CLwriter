@@ -19,6 +19,7 @@ import EntitySuggestion from '@/components/editor/EntitySuggestion'
 import WorldStatePanel from '@/components/sidebar/WorldStatePanel'
 
 // Codex 状态组件 - 可视化面板
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function CodexStatus() {
     const { state } = useNovelState()
     const [flashField, setFlashField] = useState<string | null>(null)

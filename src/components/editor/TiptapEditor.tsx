@@ -15,8 +15,7 @@ import {
     Loader2,
     Target,
     Ban,
-    MapPin,
-    BookCheck
+    MapPin
 } from 'lucide-react'
 import { streamWithRAG } from '@/lib/rag'
 import { useNovelState } from '@/lib/novel-state'
@@ -25,12 +24,10 @@ import { predictPlotBranches } from '@/lib/ai/brainstorm'
 import { saveChapterWithSummary } from '@/lib/ai/summary'
 import { useNovelStore, type Prediction, type PredictionType } from '@/lib/store/novel-store'
 import { updateFile, getFileById } from '@/lib/actions/files'
-import { updateFileEmbedding } from '@/lib/ai/embedding'
 import ChapterLauncher from './ChapterLauncher'
 import EngineSwitch from './EngineSwitch'
 import ViralFlow from './ViralFlow'
 import RhythmMonitor from './RhythmMonitor'
-import EntitySuggestion from './EntitySuggestion'
 import ReaderSandbox from './ReaderSandbox'
 import { analyzeEntities } from '@/lib/analysis/entity'
 
@@ -62,6 +59,7 @@ export default function TiptapEditor() {
     const [cotStatus, setCotStatus] = useState<CoTStatus>('idle')
     const [cotExpanded, setCotExpanded] = useState(true)
     const [isBrainstorming, setIsBrainstorming] = useState(false)
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const [isSavingChapter, setIsSavingChapter] = useState(false)
     const [currentChapterNumber, setCurrentChapterNumber] = useState(1)
     const { state, updateState, addItem, removeItem, setLocation } = useNovelState()
@@ -372,6 +370,7 @@ export default function TiptapEditor() {
                 clearTimeout(entityAnalysisTimerRef.current)
             }
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [editor, handleSave, setDirty, currentNovelId, setDiscoveredEntities])
 
     // 获取光标前 200 字符作为起点
@@ -539,6 +538,7 @@ ${memoryContext}
     }
 
     // 完成本章 - 生成摘要并保存
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const handleCompleteChapter = async () => {
         if (!editor) return
 

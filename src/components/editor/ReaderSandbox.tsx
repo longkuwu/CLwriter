@@ -148,7 +148,7 @@ export default function ReaderSandbox() {
                                 <div className="text-center py-12">
                                     <Users className="h-12 w-12 mx-auto text-muted-foreground/30 mb-3" />
                                     <p className="text-sm text-muted-foreground">
-                                        点击"投放试读"获取读者反馈
+                                        点击&quot;投放试读&quot;获取读者反馈
                                     </p>
                                 </div>
                             )}

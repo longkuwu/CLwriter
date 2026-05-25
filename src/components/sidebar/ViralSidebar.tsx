@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from 'react'
-import { Dna, Sparkles, FolderOpen, Flame, GripVertical, Plus } from 'lucide-react'
+import { Dna, Sparkles, FolderOpen, Flame, Plus } from 'lucide-react'
 import DeconstructPanel from '@/components/sidebar/DeconstructPanel'
 import { cn } from '@/lib/utils'
 
@@ -79,7 +79,7 @@ function ImitateTab() {
                     输入新主题，结合骨架生成正文
                 </p>
                 <p className="text-xs text-muted-foreground">
-                    💡 请先在"拆解"标签页中完成分析
+                    💡 请先在&quot;拆解&quot;标签页中完成分析
                     <br />
                     仿写配置已集成在拆解流程中
                 </p>

@@ -175,9 +175,10 @@ export async function getRecentChapterSummaries(
             .limit(limit)
 
         // 按章节号正序返回（从旧到新）
-        return results.reverse().map(r => ({
+        type Row = { id: string; chapterNumber: number | null; title: string; summary: string | null }
+        return (results as Row[]).reverse().map((r: Row): ChapterInfo => ({
             id: r.id,
-            chapterNumber: r.chapterNumber,
+            chapterNumber: r.chapterNumber || 0,
             title: r.title,
             summary: r.summary || ''
         }))

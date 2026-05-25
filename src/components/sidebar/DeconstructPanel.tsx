@@ -1,11 +1,10 @@
 "use client"
 
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import {
     Dna,
     Sparkles,
     Loader2,
-    ChevronRight,
     ChevronLeft,
     Copy,
     Check,
@@ -14,8 +13,6 @@ import {
     Zap,
     Palette,
     Upload,
-    FileText,
-    AlertTriangle,
     Layers,
     Cpu,
     Rocket,
@@ -31,8 +28,7 @@ import {
 } from '@/lib/ai/viral-agent'
 import {
     analyzeText,
-    type StructureAnalysis,
-    type BeatItem
+    type StructureAnalysis
 } from '@/lib/ai/deconstruct-agent'
 import {
     remapSkeleton,
@@ -42,13 +38,11 @@ import {
     type SerializationState
 } from '@/lib/ai/imitation-agent'
 import {
-    LONG_TEXT_THRESHOLD,
-    MEGA_TEXT_THRESHOLD,
     getAnalysisMode,
     getAnalysisModeLabel,
     type AnalysisMode
 } from '@/lib/constants'
-import { getUserStyles, type UserStyle, buildFewShotUserPrompt } from '@/lib/actions/styles'
+import { getUserStyles, type UserStyle } from '@/lib/actions/styles'
 import { useNovelStore } from '@/lib/store/novel-store'
 import { cn } from '@/lib/utils'
 import { chunkText, readFileContent, formatWordCount, type TextMetadata } from '@/lib/utils/chunker'
@@ -696,7 +690,7 @@ export default function DeconstructPanel() {
                                 </div>
                             )}
                             <p className="text-xs text-muted-foreground mt-1">
-                                💡 在"工具"标签页的"风格工坊"中创建自定义风格
+                                💡 在&quot;工具&quot;标签页的&quot;风格工坊&quot;中创建自定义风格
                             </p>
                         </div>
 

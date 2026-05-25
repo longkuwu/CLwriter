@@ -7,7 +7,7 @@
  * 3. 自动连载生成
  */
 
-import { chatCompletion, streamChatCompletion } from '../tauri-api'
+import { chatCompletion } from '../tauri-api'
 import { createFile, updateFile } from '../actions/files'
 import type { BeatItem } from './deconstruct-agent'
 
@@ -125,7 +125,7 @@ export async function remapSkeleton(
     ).join('\n')
 
     // 替换 Prompt 模板
-    let prompt = SKELETON_REMAP_PROMPT
+    const prompt = SKELETON_REMAP_PROMPT
         .replace('{ORIGINAL_BEATS}', originalBeatsText)
         .replace('{ORIGINAL_THEME}', originalTheme)
         .replace('{NEW_THEME}', newTheme)
@@ -180,23 +180,27 @@ export async function batchCreateChapters(
             const title = `第${beat.chapter}章：${beat.newBeat}`
 
             // 创建章节文件
-            const fileId = await createFile({
+            const fileResult = await createFile({
                 projectId,
                 title,
                 type: 'chapter',
                 content: `# ${title}\n\n【待生成】\n\n节拍：${beat.newBeat}\n功能：${beat.function}\n情绪：${beat.mood}\n目标字数：${beat.targetWordCount}`,
                 order: beat.chapter,
-                metadata: JSON.stringify({
+                metadata: {
                     beat: beat.newBeat,
                     function: beat.function,
                     mood: beat.mood,
                     targetWordCount: beat.targetWordCount,
                     status: 'pending'
-                })
+                }
             })
 
+            if (!fileResult) {
+                throw new Error('创建文件返回 null')
+            }
+
             chapters.push({
-                fileId,
+                fileId: fileResult.id,
                 chapterNumber: beat.chapter,
                 title
             })
@@ -264,11 +268,10 @@ export async function autoSerialize(
             // 更新文件
             await updateFile(chapter.fileId, {
                 content: `# ${chapter.title}\n\n${content}`,
-                metadata: JSON.stringify({
-                    ...JSON.parse(beat.function || '{}'),
+                metadata: {
                     status: 'completed',
                     generatedAt: new Date().toISOString()
-                })
+                }
             })
 
             // 生成本章摘要供下一章使用
@@ -301,7 +304,7 @@ async function generateChapter(
     previousSummary: string,
     styleGuide: string
 ): Promise<string> {
-    let prompt = CHAPTER_GENERATION_PROMPT
+    const prompt = CHAPTER_GENERATION_PROMPT
         .replace('{CHAPTER_NUMBER}', beat.chapter.toString())
         .replace('{BEAT}', beat.newBeat)
         .replace('{FUNCTION}', beat.function)
@@ -391,10 +394,12 @@ export function validateSkeleton(beats: RemappedBeat[]): {
 
 // ========== 导出 ==========
 
-export default {
+const imitationAgentExports = {
     remapSkeleton,
     batchCreateChapters,
     autoSerialize,
     calculateScaleRatio,
     validateSkeleton
 }
+
+export default imitationAgentExports

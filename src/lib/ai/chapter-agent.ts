@@ -8,7 +8,7 @@
  */
 
 import { chatCompletion } from '../tauri-api'
-import { getFileById, getAllFiles, type FileData } from '../actions/files'
+import { getFileById, getAllFiles } from '../actions/files'
 import { getRecentChapterSummaries } from './summary'
 import { searchMemory } from '../memory'
 
@@ -335,7 +335,7 @@ export async function writeSceneContent(
             if (memories.length > 0) {
                 ragContext = memories.map((m, i) => `[设定${i + 1}] ${m.content}`).join('\n\n')
             }
-        } catch (e) {
+        } catch {
             console.warn('[ChapterAgent] RAG 检索失败，继续无设定模式')
         }
 

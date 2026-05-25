@@ -264,7 +264,7 @@ export function calculateTextDensity(text: string): number {
 
 // ========== 导出 ==========
 
-export default {
+const chunkerExports = {
     chunkText,
     smartChunkText,
     readFileContent,
@@ -276,3 +276,5 @@ export default {
     countSentences,
     calculateTextDensity
 }
+
+export default chunkerExports

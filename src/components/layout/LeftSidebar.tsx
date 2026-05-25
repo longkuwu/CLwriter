@@ -94,7 +94,7 @@ function GenesisTab() {
             // 1. 创建新项目
             setStepMessage('正在创建项目...')
             const projectTitle = idea.length > 10 ? idea.slice(0, 10) + '...' : idea
-            const project = await createProject({ title: projectTitle })
+            const project = await createProject(projectTitle, 'epic')
 
             if (!project) {
                 throw new Error('创建项目失败')
