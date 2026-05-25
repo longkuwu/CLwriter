@@ -67,6 +67,7 @@ const STORAGE_KEYS = {
     API_KEY: 'ip_architect_api_key',
     CUSTOM_URL: 'ip_architect_custom_api_url',
     CUSTOM_MODEL: 'ip_architect_custom_model_name',
+    CUSTOM_PROTOCOL: 'ip_architect_custom_api_protocol',  // 自定义API的协议格式
 };
 
 interface ChatMessage {
@@ -89,6 +90,11 @@ interface StreamCallbacks {
 }
 
 /**
+ * 自定义 API 的协议类型
+ */
+export type CustomApiProtocol = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'auto'
+
+/**
  * 获取当前 AI 配置
  */
 export function getAIConfig() {
@@ -100,12 +106,19 @@ export function getAIConfig() {
     const apiKey = localStorage.getItem(STORAGE_KEYS.API_KEY) || '';
     const customUrl = localStorage.getItem(STORAGE_KEYS.CUSTOM_URL) || '';
     const customModel = localStorage.getItem(STORAGE_KEYS.CUSTOM_MODEL) || '';
+    const customProtocol = (localStorage.getItem(STORAGE_KEYS.CUSTOM_PROTOCOL) || 'auto') as CustomApiProtocol;
 
     const providerConfig = AI_PROVIDERS[provider];
     const baseUrl = provider === 'custom' ? customUrl : providerConfig.baseUrl;
     const model = provider === 'custom' && customModel ? customModel : providerConfig.defaultModel;
 
-    return { provider, apiKey, baseUrl, model };
+    // 解析实际使用的协议
+    let protocol: CustomApiProtocol
+    if (provider === 'anthropic') protocol = 'anthropic'
+    else if (provider === 'custom') protocol = customProtocol === 'auto' ? 'openai' : customProtocol
+    else protocol = 'openai'
+
+    return { provider, apiKey, baseUrl, model, customProtocol, protocol };
 }
 
 /**
@@ -116,14 +129,18 @@ export function saveAIConfig(config: {
     apiKey: string;
     customUrl?: string;
     customModel?: string;
+    customProtocol?: CustomApiProtocol;
 }) {
     localStorage.setItem(STORAGE_KEYS.PROVIDER, config.provider);
     localStorage.setItem(STORAGE_KEYS.API_KEY, config.apiKey);
-    if (config.customUrl) {
+    if (config.customUrl !== undefined) {
         localStorage.setItem(STORAGE_KEYS.CUSTOM_URL, config.customUrl);
     }
-    if (config.customModel) {
+    if (config.customModel !== undefined) {
         localStorage.setItem(STORAGE_KEYS.CUSTOM_MODEL, config.customModel);
+    }
+    if (config.customProtocol !== undefined) {
+        localStorage.setItem(STORAGE_KEYS.CUSTOM_PROTOCOL, config.customProtocol);
     }
 }
 
@@ -151,23 +168,111 @@ async function tauriHttpProxy(
 /**
  * 构建请求头
  */
-function buildHeaders(apiKey: string, provider: AIProviderKey): Record<string, string> {
+function buildHeaders(apiKey: string, protocol: CustomApiProtocol): Record<string, string> {
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
     };
 
-    if (provider === 'anthropic') {
+    if (protocol === 'anthropic') {
         headers['x-api-key'] = apiKey;
         headers['anthropic-version'] = '2023-06-01';
+    } else if (protocol === 'gemini') {
+        // Gemini 用 ?key= 参数,header 不带 Authorization
     } else {
-        headers['Authorization'] = `Bearer ${apiKey}`;
+        // openai / ollama
+        if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
     return headers;
 }
 
 /**
- * 非流式对话
+ * 构建请求 URL (Gemini 需要把 key 拼到 URL)
+ */
+function buildRequestUrl(baseUrl: string, model: string, protocol: CustomApiProtocol, apiKey: string): string {
+    if (protocol === 'anthropic') {
+        // Anthropic: POST /v1/messages
+        return `${baseUrl}/messages`
+    }
+    if (protocol === 'gemini') {
+        // Gemini: POST /v1beta/models/{model}:generateContent?key=...
+        const root = baseUrl.includes('/v1beta') ? baseUrl : `${baseUrl}/v1beta`
+        return `${root}/models/${model}:generateContent?key=${apiKey}`
+    }
+    // openai / ollama: POST /chat/completions
+    return `${baseUrl}/chat/completions`
+}
+
+/**
+ * 构建请求 body (各协议格式不同)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function buildRequestBody(messages: ChatMessage[], model: string, options: { temperature?: number; maxTokens?: number; stream?: boolean }, protocol: CustomApiProtocol): any {
+    const stream = options.stream ?? false
+
+    if (protocol === 'anthropic') {
+        // Anthropic: { model, max_tokens, system, messages: [{role, content}] }
+        const sys = messages.find(m => m.role === 'system')?.content
+        const others = messages.filter(m => m.role !== 'system')
+        return {
+            model,
+            max_tokens: options.maxTokens ?? 2048,
+            temperature: options.temperature ?? 0.7,
+            system: sys,
+            messages: others.map(m => ({ role: m.role, content: m.content })),
+            stream
+        }
+    }
+
+    if (protocol === 'gemini') {
+        // Gemini: { contents: [{role: 'user'|'model', parts: [{text}]}], systemInstruction, generationConfig }
+        const sys = messages.find(m => m.role === 'system')?.content
+        const others = messages.filter(m => m.role !== 'system')
+        return {
+            systemInstruction: sys ? { parts: [{ text: sys }] } : undefined,
+            contents: others.map(m => ({
+                role: m.role === 'assistant' ? 'model' : 'user',
+                parts: [{ text: m.content }]
+            })),
+            generationConfig: {
+                temperature: options.temperature ?? 0.7,
+                maxOutputTokens: options.maxTokens ?? 2048
+            }
+        }
+    }
+
+    // openai / ollama
+    return {
+        model,
+        messages,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 2048,
+        stream
+    }
+}
+
+/**
+ * 提取响应内容 (各协议格式不同)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractContent(data: any, protocol: CustomApiProtocol): string {
+    if (protocol === 'anthropic') {
+        // { content: [{ type: 'text', text: '...' }] }
+        if (Array.isArray(data?.content)) {
+            return data.content.map((c: { text?: string }) => c.text || '').join('')
+        }
+        return ''
+    }
+    if (protocol === 'gemini') {
+        // { candidates: [{ content: { parts: [{text}] } }] }
+        return data?.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text || '').join('') || ''
+    }
+    // openai / ollama
+    return data?.choices?.[0]?.message?.content || ''
+}
+
+/**
+ * 非流式对话 (协议自适应: openai / anthropic / gemini / ollama)
  */
 export async function chatCompletion(
     messages: ChatMessage[],
@@ -179,52 +284,58 @@ export async function chatCompletion(
 ): Promise<string> {
     const config = getAIConfig();
 
-    if (!config.apiKey) {
+    if (!config.apiKey && config.protocol !== 'ollama') {
         throw new Error('请先配置 API Key');
     }
 
-    const url = `${config.baseUrl}/chat/completions`;
-    const headers = buildHeaders(config.apiKey, config.provider);
-
-    const body: ChatCompletionRequest = {
-        model: options?.model || config.model,
-        messages,
-        temperature: options?.temperature ?? 0.7,
-        max_tokens: options?.maxTokens ?? 2048,
-        stream: false,
-    };
+    const model = options?.model || config.model;
+    const url = buildRequestUrl(config.baseUrl, model, config.protocol, config.apiKey);
+    const headers = buildHeaders(config.apiKey, config.protocol);
+    const body = buildRequestBody(messages, model, {
+        temperature: options?.temperature,
+        maxTokens: options?.maxTokens,
+        stream: false
+    }, config.protocol);
 
     if (isTauriEnv()) {
-        // 使用 Tauri 代理
         const response = await tauriHttpProxy(url, 'POST', headers, JSON.stringify(body));
-
         if (!response.ok) {
             const errorData = JSON.parse(response.body || '{}');
-            throw new Error(errorData?.error?.message || `API 请求失败: ${response.status}`);
+            throw new Error(errorData?.error?.message || errorData?.message || `API 请求失败: ${response.status}`);
         }
-
         const data = JSON.parse(response.body);
-        return data.choices?.[0]?.message?.content || '';
+        return extractContent(data, config.protocol);
     } else {
-        // 直接 fetch (开发时可能会有 CORS 问题)
-        const response = await fetch(url, {
+        // 浏览器开发环境: 走 Next.js API 代理绕过 CORS
+        const proxyResp = await fetch('/api/proxy', {
             method: 'POST',
-            headers,
-            body: JSON.stringify(body),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url,
+                method: 'POST',
+                headers,
+                body: JSON.stringify(body)
+            })
         });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData?.error?.message || `API 请求失败: ${response.status}`);
+        if (!proxyResp.ok) {
+            throw new Error(`代理失败: ${proxyResp.status}`);
         }
-
-        const data = await response.json();
-        return data.choices?.[0]?.message?.content || '';
+        const proxyData = await proxyResp.json();
+        if (!proxyData.ok) {
+            try {
+                const err = JSON.parse(proxyData.body)
+                throw new Error(err?.error?.message || err?.message || `API 请求失败: ${proxyData.status}`);
+            } catch {
+                throw new Error(`API 请求失败: ${proxyData.status}`);
+            }
+        }
+        const data = JSON.parse(proxyData.body);
+        return extractContent(data, config.protocol);
     }
 }
 
 /**
- * 流式对话 (使用 Tauri 事件)
+ * 流式对话 (协议自适应: openai / anthropic / gemini / ollama)
  */
 export async function streamChatCompletion(
     messages: ChatMessage[],
@@ -244,21 +355,50 @@ export async function streamChatCompletion(
         onError: callbacks?.onError || ((e: string) => console.error('Stream error (no callback):', e))
     };
 
-    if (!config.apiKey) {
+    if (!config.apiKey && config.protocol !== 'ollama') {
         safeCallbacks.onError('请先配置 API Key');
         return;
     }
 
-    const url = `${config.baseUrl}/chat/completions`;
-    const headers = buildHeaders(config.apiKey, config.provider);
+    const model = options?.model || config.model;
+    const url = buildRequestUrl(config.baseUrl, model, config.protocol, config.apiKey);
+    const headers = buildHeaders(config.apiKey, config.protocol);
+    const body = buildRequestBody(messages, model, {
+        temperature: options?.temperature,
+        maxTokens: options?.maxTokens,
+        stream: true
+    }, config.protocol);
 
-    const body: ChatCompletionRequest = {
-        model: options?.model || config.model,
-        messages,
-        temperature: options?.temperature ?? 0.7,
-        max_tokens: options?.maxTokens ?? 2048,
-        stream: true,
-    };
+    // SSE chunk 解析(各协议格式不同)
+    const parseChunk = (rawChunk: string) => {
+        const lines = rawChunk.split('\n')
+        for (const line of lines) {
+            if (!line.startsWith('data: ')) continue
+            const data = line.slice(6).trim()
+            if (data === '[DONE]' || !data) continue
+            try {
+                const json = JSON.parse(data)
+                let content = ''
+
+                if (config.protocol === 'anthropic') {
+                    // Anthropic: { type: 'content_block_delta', delta: { text } }
+                    if (json.type === 'content_block_delta') {
+                        content = json.delta?.text || ''
+                    }
+                } else if (config.protocol === 'gemini') {
+                    // Gemini: { candidates: [{ content: { parts: [{text}] } }] }
+                    content = json.candidates?.[0]?.content?.parts?.[0]?.text || ''
+                } else {
+                    // openai / ollama
+                    content = json.choices?.[0]?.delta?.content || ''
+                }
+
+                if (content) safeCallbacks.onChunk(content)
+            } catch {
+                // 忽略解析错误
+            }
+        }
+    }
 
     if (isTauriEnv()) {
         // 使用 Tauri 流式代理
@@ -267,25 +407,8 @@ export async function streamChatCompletion(
         let unlistenError: UnlistenFn | null = null;
 
         try {
-            // 监听流式事件
             unlistenChunk = await listen<string>('stream-chunk', (event) => {
-                // 解析 SSE 数据
-                const lines = event.payload.split('\n');
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
-                        try {
-                            const json = JSON.parse(data);
-                            const content = json.choices?.[0]?.delta?.content;
-                            if (content) {
-                                safeCallbacks.onChunk(content);
-                            }
-                        } catch {
-                            // 忽略解析错误
-                        }
-                    }
-                }
+                parseChunk(event.payload);
             });
 
             unlistenDone = await listen('stream-done', () => {
@@ -296,7 +419,6 @@ export async function streamChatCompletion(
                 safeCallbacks.onError(event.payload);
             });
 
-            // 发起流式请求
             await invoke('http_stream', {
                 request: { url, method: 'POST', headers, body: JSON.stringify(body) },
             });
@@ -316,7 +438,7 @@ export async function streamChatCompletion(
 
             if (!response.ok || !response.body) {
                 const errorData = await response.json().catch(() => ({}));
-                safeCallbacks.onError(errorData?.error?.message || `API 请求失败: ${response.status}`);
+                safeCallbacks.onError(errorData?.error?.message || errorData?.message || `API 请求失败: ${response.status}`);
                 return;
             }
 
@@ -328,23 +450,7 @@ export async function streamChatCompletion(
                 if (done) break;
 
                 const text = decoder.decode(value);
-                const lines = text.split('\n');
-
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.slice(6);
-                        if (data === '[DONE]') continue;
-                        try {
-                            const json = JSON.parse(data);
-                            const content = json.choices?.[0]?.delta?.content;
-                            if (content) {
-                                safeCallbacks.onChunk(content);
-                            }
-                        } catch {
-                            // 忽略解析错误
-                        }
-                    }
-                }
+                parseChunk(text);
             }
 
             safeCallbacks.onDone();
