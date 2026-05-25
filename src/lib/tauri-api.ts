@@ -272,9 +272,37 @@ function extractContent(data: any, protocol: CustomApiProtocol): string {
 }
 
 /**
- * 非流式对话 (协议自适应: openai / anthropic / gemini / ollama)
+ * 非流式对话
+ *
+ * 优先用协议蓝图系统(新),fallback 到旧硬编码逻辑(向后兼容)
  */
 export async function chatCompletion(
+    messages: ChatMessage[],
+    options?: {
+        model?: string;
+        temperature?: number;
+        maxTokens?: number;
+    }
+): Promise<string> {
+    // 优先尝试新协议蓝图
+    try {
+        const { getActiveBlueprint, chatCompletion: bpChat } = await import('./ai/protocol/client')
+        const active = getActiveBlueprint()
+        if (active && (active.apiKey || active.blueprint.auth.location === 'none')) {
+            return await bpChat(messages, options)
+        }
+    } catch (e) {
+        console.warn('[chatCompletion] 蓝图调用失败,fallback 到旧逻辑:', e instanceof Error ? e.message : e)
+    }
+
+    // === 旧逻辑 (兼容旧设置) ===
+    return await legacyChatCompletion(messages, options)
+}
+
+/**
+ * 旧版本硬编码 chatCompletion (兼容旧设置)
+ */
+async function legacyChatCompletion(
     messages: ChatMessage[],
     options?: {
         model?: string;
@@ -335,9 +363,35 @@ export async function chatCompletion(
 }
 
 /**
- * 流式对话 (协议自适应: openai / anthropic / gemini / ollama)
+ * 流式对话
+ *
+ * 优先用协议蓝图系统(新),fallback 到旧逻辑
  */
 export async function streamChatCompletion(
+    messages: ChatMessage[],
+    callbacks: StreamCallbacks,
+    options?: {
+        model?: string;
+        temperature?: number;
+        maxTokens?: number;
+    }
+): Promise<void> {
+    // 优先尝试新协议蓝图
+    try {
+        const { getActiveBlueprint, streamChatCompletion: bpStream } = await import('./ai/protocol/client')
+        const active = getActiveBlueprint()
+        if (active && (active.apiKey || active.blueprint.auth.location === 'none')) {
+            return await bpStream(messages, callbacks, options)
+        }
+    } catch (e) {
+        console.warn('[streamChat] 蓝图调用失败,fallback 到旧逻辑:', e instanceof Error ? e.message : e)
+    }
+
+    // === 旧逻辑 ===
+    return await legacyStreamChatCompletion(messages, callbacks, options)
+}
+
+async function legacyStreamChatCompletion(
     messages: ChatMessage[],
     callbacks: StreamCallbacks,
     options?: {
