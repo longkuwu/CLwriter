@@ -10,11 +10,14 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
 
 - [ ] 1. 数据库 Schema 扩展
   - 在 `src/lib/db/schema.ts` 新增 `agentTasks` 表 (字段见 design.md §2.6)
-  - 在 `src/lib/db/schema.ts` 新增 `agentMessages` 表
-  - 在 `src/lib/db/schema.ts` 新增 `promptOverrides` 表
-  - 在 `entities` 表新增字段: `level`, `appearanceCount`, `anchor`, `lastAppearedChapter`, `levelManuallyLocked`
+    - **含 phase / resumePoint / attempt 字段** (Req 21, Review #6)
+  - 在 `src/lib/db/schema.ts` 新增 `agentMessages` 表 (反范式: parentTaskId/agentName/chapterId, Review #5)
+  - 在 `src/lib/db/schema.ts` 新增 `promptOverrides` 表 (含 version/isActive/validationErrors, Req 27)
+  - 在 `src/lib/db/schema.ts` 新增 `chapterCommits` 表 (Req 19, commit journal)
+  - 在 `src/lib/db/schema.ts` 新增 `budgetSessions` 表 (Req 28)
+  - 在 `entities` 表新增字段: `level`, `appearanceCount`, `anchor`, `anchorStatus`, `anchorStrictEnabled`, `lastAppearedChapter`, `levelManuallyLocked`
   - 用 `npx drizzle-kit generate` 生成 migration 文件
-  - _Requirements: 1.4, 2.3, 7.7, 18.2, 18.5_
+  - _Requirements: 1.4, 2.3, 7.7, 18.2, 18.5, 19, 21, 27, 28_
 
 - [ ] 2. 旧组件归档
   - 在 `src/components/` 下创建 `_archive/v2/` 目录
@@ -34,10 +37,13 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
 ### 核心抽象层
 
 - [ ] 4. Agent 基类与共享类型
-  - 创建 `src/lib/agents/core/types.ts`,定义 `AgentContext`, `AgentResult`, `Task`, `BusMessage` (代码见 design.md §2.4.1)
-  - 创建 `src/lib/agents/core/errors.ts`,定义 11 个标准错误码常量 (列表见 requirements.md "错误码清单")
-  - 创建 `src/lib/agents/core/events.ts`,定义 9 个标准事件名常量
+  - 创建 `src/lib/agents/core/types.ts`,定义 `AgentContext`, `AgentResult`, `Task`, `BusMessage`, `RewriteRequest` (代码见 design.md §2.4.1, Req 23)
+  - 创建 `src/lib/agents/core/errors.ts`,定义 11 个标准错误码常量
+  - 创建 `src/lib/agents/core/events.ts`,定义两类事件常量:
+    - **生命周期事件**: `AGENT_STARTED / AGENT_FINISHED / AGENT_FAILED / AGENT_PROGRESS / STREAM_CHUNK / STREAM_DRAFT_SNAPSHOT` (Review #3)
+    - **业务语义事件**: `PLAN_READY / DRAFT_READY / HUMANIZED_READY / CRITIQUED_READY / TIME_VERIFIED / CHAPTER_FINALIZED / RETRY_REQUESTED / REWRITE_REQUESTED / USER_DECISION / PIPELINE_PAUSED / PIPELINE_COMPLETED / LEVEL_UP_NOTICE`
   - 创建 `src/lib/agents/core/agent.ts`,实现 `BaseAgent<TInput, TOutput>` 抽象类
+    - **publishStart/Done/Failed 用统一事件名 `AGENT_*`,在 payload 中标识 agentName** (Review #3)
   - _Requirements: 1, 2.1_
 
 - [ ] 5. 消息总线
@@ -52,36 +58,47 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
   - 创建 `src/lib/agents/core/task-store.ts`
   - 实现 `createTask(input)`, `updateTaskStatus(id, status)`, `getTask(id)`, `getChildTasks(parentId)`
   - 实现 `markTaskCompleted(id, output)`, `markTaskFailed(id, error)`
+  - **新增 `updateTaskState(id, { phase, resumePoint, attempt })`** (Req 21, Review #6)
+  - **新增 `assertTaskNotCancelled(id)` 抛异常如已取消** (Req 25, Review #17)
+  - **新增 `persistTempDraft(id, text)` / `clearTempDraft(id)`** 写入 `output.tempDraft` 字段 (Req 20, Review #7)
   - 用 drizzle 直接操作 `agentTasks` 表
-  - _Requirements: 1.4, 15.1, 15.2_
+  - _Requirements: 1.4, 15.1, 15.2, 20, 21, 25_
 
 - [ ] 7. 任务恢复机制
   - 创建 `src/lib/agents/core/recovery.ts`
   - 实现 `detectUnfinishedTasks(projectId)`
-  - 实现 `resumeTask(parentTask)`,从最后已完成子任务的下一步继续
+  - 实现 `resumeTask(parentTask)`,从最后已完成子任务的下一步继续 (基于 `phase + resumePoint + attempt`, Req 21)
+  - **实现 `recoverChapterCommits()` 扫描 stuck 状态的 chapter_commits 提示用户处理** (Req 19, Review #1)
+  - **实现 `detectTempDrafts(projectId)` 找到未完成 Writer 任务的草稿,UI 询问基于此继续还是重新开始** (Req 20, Review #7)
   - 创建 `RestorePromptDialog` 组件,在编辑器加载时检测并提示用户
-  - _Requirements: 1.7, 15.4, 15.5_
+  - _Requirements: 1.7, 15.4, 15.5, 19, 20_
 
 - [ ] 8. 流水线编排器
   - 创建 `src/lib/agents/core/orchestrator.ts`
   - 实现 `Orchestrator` 类的 `runMVP(parentTask, input)` 方法
-  - 实现取消检查 (`abortSignal` 集成)
+  - 实现取消检查 (`abortSignal` 集成, Req 25)
   - 实现干预模式的 `waitForUserConfirm()` (Promise + bus.on 模式)
   - 实现 `markPendingReview()` 标记章节状态
-  - _Requirements: 1.5, 1.10, 7.3_
+  - **流水线全部完成后只发布 `PIPELINE_COMPLETED` 运行时事件,不发布 `CHAPTER_FINALIZED`** (Review #2)
+  - **`CHAPTER_FINALIZED` 业务事件唯一发布者是 Continuity Agent**
+  - _Requirements: 1.5, 1.10, 7.3, 25_
 
 ### Director Agent
 
 - [ ] 9. Director Agent 实现
   - 创建 `src/lib/agents/director/index.ts`,继承 `BaseAgent`
   - 实现 `startGenerateChapter(projectId, options)`:
-    - 调 `checkPrerequisites()` 校验 D5 条件
+    - 调 `checkPrerequisites()` 校验 D5 基础门槛
     - 创建 draft 章节占位 (调 `createFile` 设置 `metadata.status='draft'`)
     - 创建父任务
     - 启动 Orchestrator
   - 实现 `handleFailure(ctx, stepName, error)` 决策方法 (重试/中止)
-  - 实现 `checkPrerequisites(projectId)`: 检查 ≥1 L1 角色 + ≥1 世界观规则
-  - _Requirements: 3.1, 3.5, 3.9, 1.2_
+  - 实现 `checkPrerequisites(projectId)`: **按 D5 决策表只检查基础门槛** (Review #8):
+    - ≥1 个主角实体 (`type='character'`,等级不强求)
+    - ≥1 条世界观规则
+    - LLM 已配置且测试通过
+    - **不要求 L1 角色或完整 Anchor** (Anchor 是阶段 2 才有的能力)
+  - _Requirements: 3.1, 3.5, 3.9, 1.2, D5_
 
 - [ ] 10. Director 意图解析器 (MVP 简化版)
   - 创建 `src/lib/agents/director/intent-parser.ts`
@@ -94,12 +111,16 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
 - [ ] 11. Writer Agent 实现
   - 创建 `src/lib/agents/writer/index.ts`,继承 `BaseAgent`
   - 实现 `run(ctx, input)`:
-    - 用 `streamChatCompletion()` 流式调用 LLM
-    - 把每个 chunk 通过 `bus.publish('WRITER_CHUNK', ...)` 转发 (in-memory only)
+    - 用 `streamChatCompletion()` 流式调用 LLM,**传入 `signal: ctx.abortSignal`** (Req 25, Review #17)
+    - 把每个 chunk 通过 `bus.publish('STREAM_CHUNK', ...)` 转发 (in-memory only)
+    - **每 500 字 OR 每 2 秒调用 `persistTempDraft()` 写入草稿** (Req 20, Review #7)
     - 累积完整文本,调用 `parseChanges()` 解析 CHANGES 段
-    - CHANGES 解析失败时自重试 (最多 3 次,带反馈 prompt)
+    - CHANGES 解析失败时自重试 (最多 3 次,带反馈 prompt,**更新 attempt 字段**)
+    - **每次 LLM 调用前后用 `ctx.abortSignal.throwIfAborted()` 检查取消** (Req 25)
+    - **完成后调 `clearTempDraft()` 清理草稿,显式发布业务事件 `DRAFT_READY`** (Review #3)
+  - **实现 `handleRewriteRequest(ctx, req, prevDraft)` 处理 Critic/Anchor 的局部重写** (Req 23, Review #10)
   - 复用 v2.0 的 `engine/changes/parser.ts` 和 `engine/prompts/chapter.ts`
-  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6_
+  - _Requirements: 4.1, 4.2, 4.3, 4.5, 4.6, 4.7, 4.8, 19, 20, 23, 25_
 
 - [ ] 12. Writer Prompt 构建
   - 创建 `src/lib/agents/writer/prompts.ts`
@@ -113,39 +134,54 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
 - [ ] 13. Critic Agent 实现
   - 创建 `src/lib/agents/critic/index.ts`,继承 `BaseAgent`
   - 实现 `run(ctx, input)`: 用 LLM 给 4 维评分 (节奏/逻辑/文笔/爽点) + JSON 输出
+  - **用 Zod Schema 严格校验 LLM 输出** (Req 24, Review #11)
   - 实现 `makeDecision(scores)`: 根据 D2 阈值 (60/80) 决策
-  - 决策结果通过总线发布: `pass` → `CRITIQUED_READY`, `partial-rewrite` → 请求 Writer 局部重写, `full-rewrite` → 请求 Writer 整章重写
+  - 决策结果通过总线发布:
+    - `pass` → 业务事件 `CRITIQUED_READY`
+    - `partial-rewrite` → `REWRITE_REQUESTED` (含 `RewriteRequest`,mode='partial', Req 23)
+    - `full-rewrite` → `REWRITE_REQUESTED` (mode='full')
   - 限制: 局部重写最多 2 轮,整章重写最多 3 次
-  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7_
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 23, 24_
 
-- [ ] 14. Critic 评分逻辑
+- [ ] 14. Critic 评分逻辑 + Zod Schema
   - 创建 `src/lib/agents/critic/scoring.ts`
-  - 实现 `parseScores(llmResponse)`: 健壮的 JSON 提取 (处理 markdown code block 包裹)
+  - **引入 zod 依赖,定义 `CriticResultSchema`** (Req 24, Review #11)
+  - 实现 `parseScores(llmResponse)`: 健壮的 JSON 提取 (处理 markdown code block 包裹) + Zod 校验
+  - **校验失败时自动重试 LLM 2 次,仍失败则强制通过 70 分并标记 pending_review**
   - 实现 `buildSuggestions(scores)`: 把每维度的低分转换成可读建议
-  - _Requirements: 5.3_
+  - 实现 `buildRewriteRequest(decision, issues)`: 构建结构化 RewriteRequest (Req 23)
+  - _Requirements: 5.3, 23, 24_
 
 ### Continuity Agent
 
 - [ ] 15. Continuity Agent 实现
   - 创建 `src/lib/agents/continuity/index.ts`,继承 `BaseAgent`
   - 实现 `run(ctx, input)`:
+    - **更新 phase='validating'** (Req 21)
     - 调 `runAllGates()` 执行 6 道门禁 (复用 v2.0 的 `engine/gates/orchestrator.ts`)
     - 失败 → throw `E_GATE_FAILED`,带门禁反馈
-    - 成功 → 调 `commitTransaction()` 原子写入
-  - 限制: 失败重试 3 次,然后标记 `pending_review`
-  - _Requirements: 6.1, 6.3, 6.4_
+    - 成功 → **更新 phase='committing',调 `commitWithJournal()`** (Req 19, Review #1)
+    - **commit 完成后显式发布业务事件 `CHAPTER_FINALIZED`** (唯一发布者, Review #2)
+  - 限制: 失败重试 3 次 (基于 `attempt` 字段),然后标记 `pending_review`
+  - _Requirements: 6.1, 6.3, 6.4, 6.5, 19, 21_
 
-- [ ] 16. Continuity 原子事务
-  - 创建 `src/lib/agents/continuity/transaction.ts`
-  - 实现 `commitTransaction(ctx, input, prevSnapshot)`:
-    - 1. 更新章节文件: `metadata.status='draft' → 'final'`,`content=input.body`
-    - 2. 写入 CHANGES 记录到 `chapter_changes` 表
-    - 3. 调 `projectSnapshot()` + `saveSnapshot()` 投影并保存新快照
-    - 4. 更新涉及角色的 `appearanceCount` 字段
-    - 5. 检查 `appearanceCount` 跨阈值,自动升级 `level` 字段 (D3)
-    - 6. 升级时通过总线发布 `CHARACTER_LEVEL_UP` 事件供 Director 通知用户
-  - 失败时 rollback (反向删除已写部分,因为 PGlite 不支持显式事务)
-  - _Requirements: 6.2, 6.6, 18.6, 18.7_
+- [ ] 16. Continuity Commit Journal
+  - 创建 `src/lib/agents/continuity/commit-journal.ts` (替代旧的 transaction.ts)
+  - 实现 `commitWithJournal(ctx, input, newSnap)`:
+    1. 在 `chapter_commits` 写 status='preparing' 记录,含完整 payload
+    2. 标记 status='committing'
+    3. 顺序执行 4 步,每步前 `assertTaskNotCancelled()` (Req 25)
+    4. 每完成一步原子更新 `currentStep`
+    5. 全部完成 → status='committed'
+    6. 任意失败 → status='failed' + 记录 failedStep/failedError
+  - 实现 4 个步骤函数:
+    - `updateFile(chapterId, body)` (draft → final)
+    - `insertChapterChange(chapterId, changes)`
+    - `saveSnapshot(commitId, newSnap)`
+    - `updateAppearanceCounts(chapterId, changes)` 含等级升级 (Req 6.6, 18.6)
+  - **等级升级时仅更新 `entities.level`,不修改 `anchorStatus`** (Review #9)
+  - **升级时发布 `LEVEL_UP_NOTICE` 业务事件** (Req 18.7)
+  - _Requirements: 6.2, 6.6, 18.6, 18.7, 19, 25_
 
 ### UI 工作台
 
@@ -220,13 +256,47 @@ CLwriter v3.0 — 多 Agent 协作小说创作系统
   - 在 AgentDrawer 内嵌入 (仅专家模式可见)
   - 显示当前提示词 + 可编辑文本框
   - 模板变量提示 (硬编码列表)
-  - 保存到 `prompt_overrides` 表
-  - _Requirements: 7.4, 7.5, 7.7, 7.9_
+  - **保存到 `prompt_overrides` 表,使用版本化机制** (Req 27, Review #16):
+    - 每次保存创建新 version,旧版本 isActive=false
+    - 保存前调 `validatePromptVars()` 校验模板变量
+    - 校验失败时记录 `validationErrors` 但允许保存
+  - **提供"回滚到上一版"按钮** (Req 27)
+  - _Requirements: 7.4, 7.5, 7.7, 7.9, 27_
+
+- [ ] 27a. Prompt 版本管理服务
+  - 创建 `src/lib/agents/core/prompt-store.ts`
+  - 实现 `getActivePrompt(projectId, agentName)` (返回 isActive=true 的最新版本)
+  - 实现 `savePrompt(projectId, agentName, template)` (创建新版本)
+  - 实现 `rollbackPrompt(projectId, agentName)` (上一版生效)
+  - 实现 `validatePromptVars(template, allowedVars)` 模板变量校验
+  - 实现 `cleanupOldVersions(projectId, agentName, keep=10)` 自动清理
+  - _Requirements: 27_
 
 - [ ] 28. 创世流水线强制审核 (D4 占位)
   - 即使一键模式,创世流水线 (阶段 3 实现) SHALL 强制每步暂停
-  - 阶段 1 用 placeholder: 当用户首次创建项目时,提示"请手动创建至少 1 个 L1 角色 + 1 条世界观规则后再生成章节"
+  - 阶段 1 用 placeholder: 当用户首次创建项目时,提示"请手动创建至少 1 个主角实体 + 1 条世界观规则后再生成章节"
   - _Requirements: 7.10, 13.2_
+
+- [ ] 28a. RuntimeMode 检测与差异化能力
+  - 创建 `src/lib/agents/core/runtime.ts`
+  - 实现 `detectRuntime()` 返回 `'browser' | 'tauri'`
+  - 把 RuntimeMode 存入全局 zustand store
+  - **browser 模式: 监听 `document.visibilitychange`,标签页隐藏 ≥5 分钟暂停 Auto-Pilot** (Req 29)
+  - **browser 模式: Auto-Pilot 单次最多 5 章** (Req 29)
+  - UI 右下角显示运行时徽章
+  - _Requirements: 29, D7_
+
+- [ ] 28b. Token 预算服务 (基础版,阶段 1 简化)
+  - 创建 `src/lib/agents/core/token-budget.ts`
+  - 实现 `estimateTokens(text)` 简单估算 (英文 4 字符/token,中文 1.5 字符/token)
+  - 实现 `getModelContextLimit(blueprintId, modelId)` 从协议蓝图读取
+  - 实现 `BudgetSession` 类管理跨任务累计 (Req 28, Review #18):
+    - `start(projectId, mode, maxTokens)` 创建 budget_sessions 记录
+    - `recordUsage(tokens)` 原子累加
+    - `checkLimit()` 超过 80% 触发警告,达到上限抛 `E_BUDGET_EXCEEDED`
+    - `end()` 标记 session 结束
+  - 在每个 Agent 调用 LLM 后自动 `session.recordUsage(metrics.tokens)`
+  - _Requirements: 22, 28, 17.5, 17.6_
 
 ### 收尾
 

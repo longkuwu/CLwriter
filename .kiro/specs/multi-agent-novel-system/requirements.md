@@ -98,6 +98,10 @@ Writer → Critic → Continuity
 
 任意 Agent 触发重写时,系统须在 UI 上展示原因和当前重写次数。
 
+**重写计数持久化 (修订自 REVIEW-2026-05 #6):**
+- `agent_tasks.attempt` 字段记录当前 Agent 的尝试次数
+- 任务恢复时基于 `attempt` 决定是否还能重试,避免恢复后重置计数
+
 #### D3: 角色三级模型
 
 | 等级 | 判定标准 | Anchor 内容 | 校验强度 |
@@ -122,14 +126,59 @@ WorldBuilder → Character → Outliner
 ```
 每步完成后**强制暂停**等待用户审核,即使是一键模式。
 
-#### D5: 章节生成最低前置条件
+#### D5: 章节生成最低前置条件 (修订自 REVIEW-2026-05 #8)
 
-**触发章节生成前,项目须满足:**
-- ≥1 个 L1 角色 (有完整 Anchor 档案)
+**章节生成的前置条件按"能力级别"分两类,不混用:**
+
+**基础生成前置 (硬门槛,不满足拒绝生成):**
+- ≥1 个主角实体 (`entities.type='character'`,等级不强求)
 - ≥1 条世界观硬约束规则
 - 已配置可用 LLM (经 testConnection 通过)
 
-**不满足时**,Director 引导用户补充而非直接生成。
+**Anchor 严格校验前置 (软条件,不满足时退化):**
+- 当某 L1 角色 `anchorStatus='complete'` 时,启用该角色的严格 Anchor 校验
+- 当 `anchorStatus !== 'complete'` 时,Anchor Agent 对该角色按 L3 处理 (跳过)
+- **Anchor 不是基础门槛**,缺失只降低一致性保证,不阻塞章节生成
+
+**理由:** Anchor 是阶段 2 才存在的 Agent。在阶段 1 不能要求项目有"完整 Anchor"才能生成章节,否则 MVP 无法实施。
+
+#### D6: 角色等级与 Anchor 完整度正交 (修订自 REVIEW-2026-05 #9)
+
+**等级 (level) 和档案完整度 (anchorStatus) 是两个独立维度,不能混用。**
+
+**新增字段:**
+- `entities.anchorStatus`: `'missing' | 'partial' | 'complete'`
+  - `missing`: 完全没填
+  - `partial`: 有 core_traits 但没 vocabulary_signature (适用于 L2)
+  - `complete`: 全部字段填齐 (适用于 L1)
+- `entities.anchorStrictEnabled`: boolean,用户可手动关闭某个角色的严格校验
+
+**Anchor 校验决策表:**
+
+| level | anchorStatus | strictEnabled | Anchor 行为 |
+|-------|-------------|---------------|------------|
+| L1 | complete | true | 完整校验 (vocab + anti_traits) |
+| L1 | complete | false | 仅 anti_traits 校验 |
+| L1 | partial | * | 退化为 L2 行为 |
+| L1 | missing | * | 退化为 L3 行为 (跳过) |
+| L2 | complete/partial | * | 仅 anti_traits 校验 |
+| L2 | missing | * | 退化为 L3 行为 (跳过) |
+| L3 | * | * | 不参与 Anchor 校验 |
+
+**自动晋级时,只更新 `level`,不更新 `anchorStatus`**,因此升级后的角色按 D6 表自动退化到合理行为,不会出现"L1 但 Anchor 校验失败"的诡异状态。
+
+#### D7: 长任务运行时差异 (修订自 REVIEW-2026-05 #14)
+
+**新增运行时模式概念:**
+- `RuntimeMode = 'browser' | 'tauri'`
+- `browser` 模式: 浏览器环境,标签页可能被 throttle
+- `tauri` 模式: 桌面应用,生命周期更稳定
+
+**模式差异化能力 (MVP):**
+- `browser`: Auto-Pilot 单次最多 5 章,标签页隐藏 5 分钟自动暂停
+- `tauri`: Auto-Pilot 单次最多按 Req 14.7 (1 小时或 500K token)
+
+**注意:** 这是"能力差异",不是"架构差异"。所有 Agent 仍跑在客户端,只是 Auto-Pilot 上限不同。Tauri sidecar / Rust command 不在 v3.0 范围。
 
 ## Glossary
 
@@ -145,13 +194,21 @@ WorldBuilder → Character → Outliner
 | **数据包 (Pack)** | Memory Agent 为下游 Agent 准备的上下文集合 (含 L1-L6 多层) |
 | **Anchor (锚点/指纹)** | 角色的"性格 DNA",包含口头禅/句式偏好/不可违反的反向特征等 |
 | **L1/L2/L3 角色** | 三级角色模型 (D3 决策),决定 Anchor 完整度 |
+| **anchorStatus** | 角色档案完整度: missing/partial/complete (D6 决策) |
+| **anchorStrictEnabled** | 用户可手动关闭某角色的严格 Anchor 校验 (D6 决策) |
 | **创世流水线** | 项目初始化时的 WorldBuilder→Character→Outliner 链路 (D4 决策) |
 | **主流水线** | 章节生成时的 ChapterPlanner→...→Continuity 链路 (D1 决策) |
-| **一键/干预/专家模式** | 三种用户干预级别 (D5 决策) |
+| **一键/干预/专家模式** | 三种用户干预级别 (Q4 决策) |
 | **Auto-Pilot** | 连续生成 N 章的全自动模式 |
 | **Co-Pilot** | 用户每次手动触发单章生成的半自动模式 |
 | **pending_review** | 章节状态: 自动流水线无法完成,需要用户人工处理 |
-| **DRAFT/HUMANIZED/CRITIQUED/TIME_VERIFIED/FINALIZED** | 流水线事件流的 5 个里程碑 |
+| **生命周期事件** | Agent 函数执行的运行时事件 (`AGENT_STARTED/FINISHED/FAILED`),不携带业务语义 (Review #3) |
+| **业务语义事件** | 流水线推进的业务里程碑事件 (`PLAN_READY` `DRAFT_READY` `CHAPTER_FINALIZED` 等) |
+| **commit journal** | 章节落地的两阶段提交日志 (`chapterCommits` 表),实现"假事务"的可恢复性 (Review #1) |
+| **RuntimeMode** | `browser` 或 `tauri`,影响 Auto-Pilot 上限和恢复策略 (D7 决策) |
+| **TokenBudget** | 跨 Agent 的统一 token 预算服务,防止数据包超 LLM context (Review #12) |
+| **RewriteRequest** | Critic 请求 Writer 重写时的结构化请求,含 mode/targetRanges/preserveChanges (Review #10) |
+| **budgetSession** | Auto-Pilot 跨章累计 token 的会话表 (Review #18) |
 
 ## Requirements
 
@@ -187,7 +244,21 @@ WorldBuilder → Character → Outliner
 7. WHEN 任务被恢复 THEN 系统 SHALL 从最后一个未完成的子任务继续,而不是从头来过
 8. WHEN 总线持久化消息超过 10000 条 THEN 系统 SHALL 归档老消息到压缩 JSON 文件,DB 仅保留最近 1000 条
 
-**标准语义级事件清单:**
+**标准事件清单 (修订自 REVIEW-2026-05 #3):**
+
+事件分两类,**不可混用**:
+
+**生命周期事件 (运行时,UI 用):**
+| 事件名 | 含义 |
+|--------|------|
+| `AGENT_STARTED` | Agent 开始执行 (payload 含 agentName) |
+| `AGENT_FINISHED` | Agent 函数返回 (无论成败,带 success: boolean) |
+| `AGENT_FAILED` | Agent 抛异常 (带错误码) |
+| `AGENT_PROGRESS` | Agent 内部进度报告 (如 Humanizer 第 N 轮) |
+| `STREAM_CHUNK` | 流式输出片段 (in-memory 不持久化) |
+| `STREAM_DRAFT_SNAPSHOT` | 节流式草稿快照 (持久化, Review #7) |
+
+**业务语义事件 (流水线,Agent 用):**
 | 事件名 | 发布者 | 含义 |
 |--------|--------|------|
 | `PLAN_READY` | ChapterPlanner | 章节蓝图已就绪 |
@@ -195,10 +266,15 @@ WorldBuilder → Character → Outliner
 | `HUMANIZED_READY` | Humanizer | AI 率已优化 |
 | `CRITIQUED_READY` | Critic | 审稿通过 |
 | `TIME_VERIFIED` | Timekeeper | 时间线校验通过 |
-| `CHAPTER_FINALIZED` | Continuity | 章节最终落地 |
-| `<AGENT>_FAILED` | 任意 Agent | 该 Agent 失败 |
+| `CHAPTER_FINALIZED` | **唯一: Continuity** | 章节最终落地 (Review #2) |
 | `RETRY_REQUESTED` | Director | 请求某 Agent 重试 |
-| `USER_INTERVENTION` | UI | 用户在干预模式下要求暂停 |
+| `REWRITE_REQUESTED` | Critic/Anchor | 请求 Writer 局部或整章重写 (含 RewriteRequest) |
+| `USER_DECISION` | UI | 用户在干预模式下的决策 |
+| `PIPELINE_PAUSED` | Orchestrator | 流水线暂停等待 |
+| `PIPELINE_COMPLETED` | Orchestrator | 编排完成 (运行时事件,非业务事件) |
+| `LEVEL_UP_NOTICE` | Continuity | 角色等级跨阈值升级提示 |
+
+**业务判断必须用业务语义事件,不能用 `AGENT_FINISHED` 推断业务结果。**
 
 ### Requirement 3: Director Agent (总导演)
 
@@ -224,13 +300,16 @@ WorldBuilder → Character → Outliner
 #### Acceptance Criteria
 
 1. WHEN Writer 收到章节蓝图 + 上下文数据包 THEN Writer SHALL 调用 LLM 流式接口生成正文
-2. WHEN LLM 流式输出 chunk THEN Writer SHALL 立即把 chunk in-memory 转发到总线 (不持久化),UI 实时追加显示
-3. WHEN Writer 完成正文 THEN Writer SHALL 在末尾追加 `---CHANGES---` 协议段
-4. IF Writer 输出的 CHANGES 段不合法 THEN Writer **自身** SHALL 自动重试 (使用反馈提示词,最多 3 次),不发 `WRITER_FAILED`
-5. IF Writer 内部重试 3 次仍失败 THEN Writer SHALL 发布 `WRITER_FAILED` 事件由 Director 处理
-6. WHEN Writer 完成 (含 CHANGES 合法) THEN Writer SHALL 发布 `DRAFT_READY` 事件携带正文 + 解析后的 CHANGES
-7. WHEN Writer 输入包含 Anchor 指纹时 (阶段 2+) THEN Writer SHALL 把指纹 (vocabulary_signature/sentence_style/anti_traits) 注入 system prompt
-8. WHEN Writer 输入包含 Memory 数据包时 (阶段 2+) THEN Writer SHALL 把数据包内容融入 system prompt 而非 user prompt
+2. WHEN LLM 流式输出 chunk THEN Writer SHALL 立即把 chunk in-memory 转发到总线 (`STREAM_CHUNK` 事件,不持久化),UI 实时追加显示
+3. WHEN Writer 流式累计达到 500 字 **OR** 距上次快照超过 2 秒 THEN Writer SHALL 把当前累计文本作为 `tempDraft` 写入 `agent_tasks.output.tempDraft` 字段 (Review #7)
+4. WHEN Writer 完成正文 THEN Writer SHALL 在末尾追加 `---CHANGES---` 协议段
+5. IF Writer 输出的 CHANGES 段不合法 THEN Writer **自身** SHALL 自动重试 (使用反馈提示词,最多 3 次,attempt 计数累加),不发 `WRITER_FAILED`
+6. IF Writer 内部重试 3 次仍失败 THEN Writer SHALL 发布 `AGENT_FAILED` 事件 (含 agentName='writer'),由 Director 处理
+7. WHEN Writer 完成 (含 CHANGES 合法) THEN Writer SHALL 发布业务事件 `DRAFT_READY` 携带正文 + 解析后的 CHANGES,**并清理 tempDraft 字段**
+8. WHEN Writer 收到 `REWRITE_REQUESTED` 事件 THEN Writer SHALL 按 RewriteRequest.mode 执行整章或局部重写 (Req 19)
+9. WHEN Writer 输入包含 Anchor 指纹时 (阶段 2+) THEN Writer SHALL 把指纹注入 system prompt (Req 11)
+10. WHEN Writer 输入包含 Memory 数据包时 (阶段 2+) THEN Writer SHALL 把数据包内容融入 system prompt 而非 user prompt
+11. WHEN 任务被恢复 AND 该 Writer 任务有 tempDraft THEN UI SHALL 询问用户是否基于 tempDraft 继续(默认是)还是从头重写
 
 ### Requirement 5: Critic Agent (编辑评审)
 
@@ -254,11 +333,11 @@ WorldBuilder → Character → Outliner
 #### Acceptance Criteria
 
 1. WHEN Continuity 收到 `TIME_VERIFIED` (阶段 3) 或 `CRITIQUED_READY` (阶段 1+2) 事件 THEN Continuity SHALL 复用 v2.0 的 6 道生成门禁逻辑
-2. WHEN 校验通过 THEN Continuity SHALL 在数据库事务内执行: 把 CHANGES 投影到本章的事实快照 (覆盖式更新) + 写入章节文件 + 写入 CHANGES 记录 + 更新角色 appearanceCount + 写入 timeline 条目
-3. WHEN 任意一道门禁失败 THEN Continuity SHALL 发布 `CONTINUITY_FAILED` 事件由 Director 处理
-4. IF 门禁连续 3 次失败 THEN Continuity SHALL 标记章节为 `pending_review` 并停止流水线
-5. WHEN 校验通过完成事务 THEN Continuity SHALL 发布 `CHAPTER_FINALIZED` 事件
-6. WHEN Continuity 更新 `appearanceCount` 后跨阈值 THEN Continuity SHALL 仅更新 `entities.level` 字段并触发 Director 通知用户 (D3 决策),**不自动生成 Anchor 内容**
+2. WHEN 校验通过 THEN Continuity SHALL 走 **commit journal 流程** (Req 19) 完成章节落地: 章节文件、CHANGES 记录、事实快照、角色 appearanceCount、timeline 条目
+3. WHEN 任意一道门禁失败 THEN Continuity SHALL 发布 `AGENT_FAILED` 事件 (agentName='continuity', 含错误详情) 由 Director 处理
+4. IF 门禁连续 3 次失败 (`agent_tasks.attempt >= 3`) THEN Continuity SHALL 标记章节为 `pending_review` 并停止流水线
+5. WHEN commit journal 全部步骤成功 THEN Continuity SHALL 发布业务事件 `CHAPTER_FINALIZED` (**唯一发布者**, Review #2)
+6. WHEN Continuity 更新 `appearanceCount` 后跨阈值 THEN Continuity SHALL 仅更新 `entities.level` 字段并发布 `LEVEL_UP_NOTICE` 事件,**不自动生成 Anchor 内容,不修改 anchorStatus** (Review #9)
 7. WHEN UI 显示门禁结果 THEN UI SHALL 列出每一道门禁的通过状态 + 错误详情
 
 ### Requirement 7: 三种用户干预模式
@@ -298,19 +377,26 @@ WorldBuilder → Character → Outliner
 
 ### Requirement 9: Humanizer Agent (反 AI 检测) — 阶段 2
 
-**User Story:** 作为网文作者,我害怕 AIGC 检测被平台识别,需要把生成内容的 AI 率压到 30% 以下。
+**User Story:** 作为网文作者,我希望系统能降低生成内容的 AI 痕迹,但我也知道 AI 检测器本身不稳定,系统应该有更可靠的本地度量。
+
+(修订自 REVIEW-2026-05 #13)
 
 #### Acceptance Criteria
 
 1. WHEN Humanizer 收到 `DRAFT_READY` 事件 THEN Humanizer SHALL 按下列顺序处理: 规则层 → AI 重写层 → 检测层
 2. WHEN 进入规则层 THEN Humanizer SHALL 应用 AI 高频词黑名单替换、句式扰动、内心戏注入 (确定性,不调 LLM)
 3. WHEN 进入 AI 重写层 THEN Humanizer SHALL 用作者风格指纹 (Style) + 个性词库重写关键段落
-4. WHEN 进入检测层 THEN Humanizer SHALL 调用 AI 检测器 (阶段 2 用云端 GPTZero API,阶段 3 切换为本地 ONNX)
-5. IF AI 率 > 30% THEN Humanizer SHALL 递归回到规则层重新处理 (最多 5 轮)
-6. WHEN 5 轮后仍 > 30% THEN Humanizer SHALL 标记章节为"AI 率超标"但仍发布 `HUMANIZED_READY` 让流程继续
-7. WHEN Humanizer 完成 THEN Humanizer SHALL 输出 AI 率分数 + 各轮变化,UI 实时显示
+4. WHEN 进入检测层 THEN Humanizer SHALL 计算两类指标:
+   - **`detectorScore`** (外部检测器参考,可缺失): 调云端 GPTZero/Originality API,失败时记 null 不阻塞
+   - **`naturalnessMetrics`** (本地可计算,**主要通过条件**): repetitionRate, sentenceLengthVariance, bannedPhraseHits, paragraphRhythmScore
+5. WHEN 进入决策 THEN Humanizer SHALL 综合评估:
+   - `naturalnessMetrics` 综合得分 ≥ 70 → 通过
+   - 综合得分 < 70 → 递归回到规则层 (最多 5 轮)
+6. WHEN 5 轮后仍未通过 THEN Humanizer SHALL 标记章节为"自然度待提升"但仍发布 `HUMANIZED_READY` 让流程继续
+7. WHEN Humanizer 完成 THEN Humanizer SHALL 输出完整指标 + 各轮变化,UI 实时显示
 8. WHEN 阶段 1 (MVP) 实施时 THEN Humanizer SHALL 不存在,流程跳过此步直接 Writer → Critic
 9. WHEN 用户配置中关闭 Humanizer THEN 系统 SHALL 跳过此 Agent,不影响其他流程
+10. WHEN detectorScore API 调用失败 THEN 系统 SHALL 仅依赖 naturalnessMetrics 决策,**不**直接通过
 
 ### Requirement 10: Memory Agent (分层记忆系统) — 阶段 2
 
@@ -333,18 +419,22 @@ WorldBuilder → Character → Outliner
 
 #### Acceptance Criteria
 
-1. WHEN Anchor 被调用前 THEN Anchor SHALL 加载本章涉及角色 (来自 ChapterPlanner 蓝图) 的 Anchor 档案
-2. WHEN 角色等级为 L3 龙套 THEN Anchor SHALL 跳过该角色,不参与注入和校验 (D3 决策)
-3. WHEN 注入 Writer prompt 前 THEN Anchor SHALL 把 L1+L2 角色的指纹格式化为 prompt 片段
-4. WHEN Writer 完成正文后 THEN Anchor SHALL 校验:
-   - L1 角色每章必须命中 ≥1 条 vocabulary_signature
-   - L1+L2 角色不得违反 anti_traits
-5. IF L1 角色未命中 vocab THEN Anchor SHALL 通过 Director 触发 Writer 局部重写 (最多 2 轮)
-6. IF L1 角色违反 anti_trait THEN Anchor SHALL 通过 Director 触发 Writer 整章重写 (最多 3 轮),失败则标记 `pending_review`
-7. IF L2 角色违反 anti_trait THEN Anchor SHALL 仅记录警告,不阻塞流程
-8. WHEN 角色档案不存在或不完整 (例如刚升级的 L3→L2 角色) THEN Anchor SHALL 通过 Director 提示用户补充,不阻塞流程
-9. WHEN 阶段 1 (MVP) 实施时 THEN Anchor SHALL 不存在
-10. WHEN Continuity 触发等级升级 (Req 6.6) THEN Anchor 档案 SHALL 保持空状态等待用户填充,Anchor Agent 在该角色档案补全前按 L3 处理 (跳过)
+1. WHEN Anchor 被调用前 THEN Anchor SHALL 加载本章涉及角色 (来自 ChapterPlanner 蓝图) 的 Anchor 档案 + level + anchorStatus
+2. WHEN 决定校验行为 THEN Anchor SHALL **严格按照 D6 决策表** 决定 (Review #9):
+   - L1 + complete + strictEnabled → 完整校验 (vocab + anti_traits)
+   - L1 + complete + !strictEnabled → 仅 anti_traits
+   - L1 + partial → 退化为 L2 行为 (仅 anti_traits)
+   - L1 + missing → 退化为 L3 行为 (跳过)
+   - L2 + complete/partial → 仅 anti_traits
+   - L2 + missing → 退化为 L3 行为 (跳过)
+   - L3 → 始终跳过
+3. WHEN 注入 Writer prompt 前 THEN Anchor SHALL 把 D6 决策表中"参与校验"的角色指纹格式化为 prompt 片段
+4. WHEN Writer 完成正文后 THEN Anchor SHALL 按 D6 决策表执行对应校验
+5. IF L1 角色 (complete + strict) 未命中 vocab THEN Anchor SHALL 发布 `REWRITE_REQUESTED` 事件 (mode='partial', Req 19),Writer 局部重写 (最多 2 轮)
+6. IF L1+L2 角色违反 anti_trait THEN Anchor SHALL 发布 `REWRITE_REQUESTED` 事件 (mode='full'),Writer 整章重写 (最多 3 轮),失败标记 `pending_review`
+7. WHEN 角色档案不存在或不完整 (例如刚升级的 L3→L2 角色,anchorStatus=missing) THEN Anchor SHALL 通过 Director 提示用户补充 (`LEVEL_UP_NOTICE` 事件携带提示),不阻塞流程
+8. WHEN 阶段 1 (MVP) 实施时 THEN Anchor SHALL 不存在
+9. WHEN Continuity 触发等级升级 (Req 6.6) THEN Anchor 档案 SHALL 保持空状态等待用户填充,Anchor Agent 在 anchorStatus 补全前按 D6 决策表降级处理 (修订自 #9)
 
 ### Requirement 12: Timekeeper Agent (时间线维护) — 阶段 3
 
@@ -453,7 +543,263 @@ WorldBuilder → Character → Outliner
 7. WHEN 系统升级角色等级 THEN Director SHALL 提示用户"角色 X 已成长为 LX,建议补充档案",用户可选择立即生成 (调用 Character Agent) 或稍后 (此时 Anchor Agent 临时按更低等级处理该角色)
 8. WHEN 用户手动归档角色 THEN 等级 SHALL 不再自动升级,但已有出场记录保留
 
-## 错误码清单
+### Requirement 19: Commit Journal (章节落地的两阶段提交) — 阶段 1
+
+**User Story:** 作为系统设计者,PGlite 不支持显式事务,但章节落地涉及多步写入,我希望任何中断后都能恢复到一致状态,不会出现"章节已写但快照未更新"的脏状态。
+
+(修订自 REVIEW-2026-05 #1)
+
+#### Acceptance Criteria
+
+1. WHEN Continuity 准备落地章节 THEN 系统 SHALL 在 `chapter_commits` 表写入一条 `status='preparing'` 记录,包含完整 payload (body, changes, snapshot, appearance updates)
+2. WHEN 进入 commit 阶段 THEN 系统 SHALL 把 status 改为 `'committing'`,然后按顺序执行写入步骤,每完成一步更新 `currentStep` 字段
+3. WHEN 全部步骤完成 THEN 系统 SHALL 把 status 改为 `'committed'`,**只有这时才发布 `CHAPTER_FINALIZED` 事件**
+4. WHEN 任意一步失败 THEN 系统 SHALL 把 status 改为 `'failed'`,记录失败步骤,不发布 CHAPTER_FINALIZED
+5. WHEN 应用启动 THEN 系统 SHALL 扫描 `chapter_commits` 中所有 status `IN ('preparing', 'committing')` 的记录
+6. WHEN 发现未完成的 commit THEN 系统 SHALL 提示用户"检测到未完成的章节落地",提供两个选项:
+   - **"继续完成"**: 从 `currentStep + 1` 继续执行剩余步骤
+   - **"标记审查"**: 把章节置为 `pending_review` 并把 commit 置为 `failed`
+7. WHEN commit 完成 THEN `chapter_commits` 记录 SHALL 保留 7 天作为审计日志,过期后自动归档/清理
+
+**`chapter_commits` 表结构:**
+```typescript
+{
+  id, projectId, parentTaskId, chapterId,
+  status: 'preparing' | 'committing' | 'committed' | 'failed',
+  currentStep: 0..N,           // 已完成步数
+  steps: string[],              // 步骤名清单
+  payload: jsonb,               // 完整待写入内容
+  failedAt?: timestamp,
+  failedStep?: string,
+  failedError?: jsonb,
+  createdAt, updatedAt
+}
+```
+
+### Requirement 20: 流式草稿快照 — 阶段 1
+
+**User Story:** 作为用户,我不希望写到第 2500 字时刷新页面就丢全部正文。
+
+(修订自 REVIEW-2026-05 #7)
+
+#### Acceptance Criteria
+
+1. WHEN Writer 流式累计达到 500 字 OR 距上次快照 ≥ 2 秒 THEN 系统 SHALL 把 `tempDraft` 字段写入 `agent_tasks.output`
+2. WHEN 写入 tempDraft THEN 系统 SHALL **不持久化每个 chunk** 到 agent_messages,只写入 `STREAM_DRAFT_SNAPSHOT` 业务事件 (Req 2)
+3. WHEN Writer 成功完成 THEN 系统 SHALL 清理 tempDraft 字段
+4. WHEN 任务被中断 (用户取消/页面刷新/崩溃) AND tempDraft 非空 THEN 任务恢复时 UI SHALL 显示 tempDraft 内容,询问用户是否基于此继续生成 (默认是)
+5. WHEN 用户选择"基于 tempDraft 继续" THEN Writer SHALL 用现有内容作为前缀,继续 LLM 调用直到完成 CHANGES 段
+6. WHEN 用户选择"重新开始" THEN 系统 SHALL 清理 tempDraft 后启动新 Writer 任务
+
+### Requirement 21: 任务状态机 — 阶段 1
+
+**User Story:** 作为系统,任务恢复时必须知道任务停在哪一步,而不是只知道"运行中"。
+
+(修订自 REVIEW-2026-05 #6)
+
+#### Acceptance Criteria
+
+1. WHEN Agent 任务运行 THEN `agent_tasks.status` SHALL 是: `pending | running | done | failed | cancelled | pending_review` 之一
+2. WHEN Agent 任务运行 THEN `agent_tasks.phase` SHALL 描述当前细分阶段:
+   - Writer: `streaming | parsing | validating | retrying`
+   - Critic: `scoring | deciding`
+   - Continuity: `validating | committing`
+   - 通用: `waiting_user | waiting_dependency | idle`
+3. WHEN 重试发生 THEN `agent_tasks.attempt` SHALL 累加 (1, 2, 3...)
+4. WHEN 任务恢复 THEN 系统 SHALL 读取 `phase + resumePoint` 决定从哪一步继续
+5. WHEN 重试次数达到 D2 决策表上限 THEN 系统 SHALL 拒绝继续重试,标记 pending_review
+6. WHEN 任务完成 THEN `phase` SHALL 被清空 (NULL)
+
+### Requirement 22: TokenBudget 服务 — 阶段 2
+
+**User Story:** 作为系统,Memory Pack 不能盲目构建,必须知道当前模型 context 上限,合理分配预算。
+
+(修订自 REVIEW-2026-05 #12)
+
+#### Acceptance Criteria
+
+1. WHEN 协议蓝图被定义 THEN 蓝图 SHALL 包含 `defaultContextLength` 字段,描述该协议下模型默认 context 上限
+2. WHEN 用户扫描模型时 (model-scanner) THEN 系统 SHALL 尝试从模型元数据提取 `contextLength`,存入用户的模型配置
+3. WHEN 任意 Agent 准备调用 LLM THEN Agent SHALL 通过 `TokenBudgetService.allocate({ model, system, blueprint, memory, output })` 申请 token 预算
+4. WHEN 估算 token 数 THEN 系统 SHALL 用 tiktoken 兼容算法 (中文按 1.5 字符/token 估算)
+5. WHEN Memory Agent 构建 Pack THEN Memory SHALL 接收上游传入的 `maxTokens` 参数,不自行决定
+6. IF Pack 超过 80% context THEN Memory SHALL 按"L1+L3 优先 → L5 减半 → L4 摘要化"顺序裁剪 (Req 10.4)
+7. WHEN LLM 调用前 THEN Agent SHALL 校验 `estimateTokens(systemPrompt + userPrompt) ≤ allocatedBudget`,否则降级 (减少 Pack/降低 maxTokens)
+
+### Requirement 23: RewriteRequest 数据结构 — 阶段 1
+
+**User Story:** 作为 Critic,我请求 Writer 改一段文字时必须明确改哪里、改成什么,而不是模糊指令。
+
+(修订自 REVIEW-2026-05 #10)
+
+#### Acceptance Criteria
+
+1. WHEN Critic 或 Anchor 请求 Writer 重写 THEN SHALL 通过 `REWRITE_REQUESTED` 事件携带 `RewriteRequest` 结构
+2. WHEN `mode='partial'` THEN RewriteRequest SHALL 包含 `targetRanges`: 数组,每项含 `startOffset`, `endOffset`, `reason`, `instruction`
+3. WHEN `mode='full'` THEN RewriteRequest SHALL 包含 `feedback` 字符串,Writer 整章重写
+4. WHEN `mode='partial'` THEN Writer SHALL 仅改写指定范围,保留其他内容
+5. WHEN `preserveChanges=false` (默认) THEN Writer 重写后 SHALL 重新生成 CHANGES 段并通过 Continuity 重新校验
+6. WHEN `preserveChanges=true` THEN Writer SHALL 保留原 CHANGES 不变 (仅当 reviewer 明确知道改动不影响状态时使用,如修标点/排版)
+7. WHEN Writer 接收到 RewriteRequest THEN Writer SHALL 在新一轮 attempt 计数下执行,attempt 累加
+
+**`RewriteRequest` 类型:**
+```typescript
+type RewriteRequest = {
+  mode: 'partial' | 'full'
+  targetRanges?: Array<{
+    startOffset: number
+    endOffset: number
+    reason: string
+    instruction: string
+  }>
+  feedback: string             // 整章重写时的整体反馈
+  preserveChanges: boolean
+  mustReparseChanges: boolean
+}
+```
+
+### Requirement 24: Critic 输出 Schema 校验 — 阶段 1
+
+**User Story:** 作为系统,Critic 调 LLM 输出 JSON 经常格式不稳定,必须用 Schema 严格校验,不让坏数据传到下游。
+
+(修订自 REVIEW-2026-05 #11)
+
+#### Acceptance Criteria
+
+1. WHEN Critic 收到 LLM 响应 THEN Critic SHALL 用 Zod Schema 校验 (引入 `zod` 依赖)
+2. WHEN Schema 校验失败 THEN Critic SHALL 重试 LLM 调用 (最多 2 次,带"格式错误反馈"提示)
+3. WHEN 重试 2 次仍失败 THEN Critic SHALL 强制通过 (评分按各维度 70 分计) 并标记 `pending_review`
+4. WHEN Schema 校验成功 THEN Critic SHALL 用 `decision` 字段决定后续行为 (`pass | partial_rewrite | full_rewrite`)
+
+**Critic 输出 Schema:**
+```typescript
+const CriticResultSchema = z.object({
+  scores: z.object({
+    pacing: z.number().min(0).max(100),
+    logic: z.number().min(0).max(100),
+    prose: z.number().min(0).max(100),
+    satisfaction: z.number().min(0).max(100),
+  }),
+  decision: z.enum(['pass', 'partial_rewrite', 'full_rewrite']),
+  issues: z.array(z.object({
+    dimension: z.enum(['pacing', 'logic', 'prose', 'satisfaction']),
+    severity: z.enum(['low', 'medium', 'high']),
+    location: z.object({
+      startOffset: z.number(),
+      endOffset: z.number(),
+    }).optional(),
+    suggestion: z.string()
+  }))
+})
+```
+
+### Requirement 25: 取消机制 — 阶段 1
+
+**User Story:** 作为用户,我点取消后系统必须真停下来,不能取消后还把结果落库。
+
+(修订自 REVIEW-2026-05 #17)
+
+#### Acceptance Criteria
+
+1. WHEN 用户点击取消 THEN Director SHALL 设置 `agent_tasks.status='cancelled'` 并 abort 父任务的 `AbortController`
+2. WHEN 任意 Agent 调用 LLM THEN 调用 SHALL 传入 `signal: ctx.abortSignal`
+3. WHEN AbortSignal 触发 THEN 协议蓝图层 (`streamChatCompletion`) SHALL 立即终止 fetch
+4. WHEN 流式调用被 abort THEN Agent SHALL 抛 `AbortError`,不继续处理
+5. WHEN 非流式调用 abort 后结果仍返回 THEN Agent SHALL 在落库前必须执行 `await assertTaskNotCancelled(taskId)`,如已取消则丢弃结果
+6. WHEN Continuity 进入 commit journal 流程后被取消 THEN 系统 SHALL 等当前步骤完成,然后回滚已写部分,标记 commit `failed`
+7. WHEN 任务恢复时发现已被取消 THEN 系统 SHALL 不恢复该任务
+
+### Requirement 26: 协议蓝图统一流式接口 — 阶段 2
+
+**User Story:** 作为 Writer,我不应该关心 OpenAI 用 `delta.content` 还是 Anthropic 用 `content_block_delta`。
+
+(修订自 REVIEW-2026-05 #15, 阶段 2 重构)
+
+#### Acceptance Criteria
+
+1. WHEN 协议蓝图层提供流式接口 THEN 接口 SHALL 返回统一的 `StreamEvent` 序列
+2. WHEN Writer 消费流式 THEN Writer SHALL 仅处理 `text_delta` 事件,不处理协议特有字段
+
+**StreamEvent 类型:**
+```typescript
+type StreamEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'usage'; usage: { promptTokens: number; completionTokens: number } }
+  | { type: 'tool_call'; ... }      // 预留未来扩展
+  | { type: 'done' }
+  | { type: 'error'; error: { code: string; message: string } }
+```
+
+3. WHEN 阶段 1 实施时 THEN 协议层保留现有回调接口 (`onChunk(text)`),Req 26 在阶段 2 重构
+
+### Requirement 27: prompt_overrides 版本管理 — 阶段 1
+
+**User Story:** 作为专家用户,我改坏了 prompt 想回滚到上一版,但又不想丢失自己的修改历史。
+
+(修订自 REVIEW-2026-05 #16)
+
+#### Acceptance Criteria
+
+1. WHEN 用户在专家模式保存 prompt 修改 THEN 系统 SHALL 创建一个新版本 (`version=N`),并把旧版本的 `isActive=false`
+2. WHEN 保存前 THEN 系统 SHALL 校验模板变量 (`{characterAnchor}`, `{memoryPack}` 等)
+3. IF 校验发现未知变量 OR 缺失必需变量 THEN 系统 SHALL 在 `validationErrors` 字段记录警告,**仍允许保存**(用户可能故意去掉变量)
+4. WHEN Agent 调用时 THEN 系统 SHALL 使用 `isActive=true` 的最新版本
+5. WHEN 用户点"回滚到上一版" THEN 系统 SHALL 把当前版本 `isActive=false`,把上一版 `isActive=true`
+6. WHEN 同一 (projectId, agentName) 历史版本超过 10 个 THEN 系统 SHALL 自动清理最早的非活跃版本
+
+**`prompt_overrides` 表结构:**
+```typescript
+{
+  id, projectId, agentName,
+  version: number,                     // 1, 2, 3...
+  promptTemplate: text,
+  isActive: boolean,
+  validationErrors: jsonb,             // [{ var: 'unknownVar', severity: 'warning' }]
+  createdAt, updatedAt
+}
+```
+
+### Requirement 28: budgetSession 跨任务累计 — 阶段 1
+
+**User Story:** 作为 Auto-Pilot 用户,我希望系统准确知道我累计花了多少 token,而不是临时聚合。
+
+(修订自 REVIEW-2026-05 #18)
+
+#### Acceptance Criteria
+
+1. WHEN 用户启动 Auto-Pilot OR 单章生成 THEN 系统 SHALL 创建一条 `budget_sessions` 记录
+2. WHEN 任意 Agent 调用 LLM 完成 THEN 系统 SHALL 原子累加 `budget_sessions.tokenUsed += tokensThisCall`
+3. WHEN `tokenUsed` 跨过 `maxTokens * 0.8` THEN 系统 SHALL 在 UI 显示警告
+4. WHEN `tokenUsed >= maxTokens` THEN 系统 SHALL 强制暂停所有正在运行的任务并通知用户 (Req 17.6)
+5. WHEN 会话结束 (Auto-Pilot 完成 / 用户停止 / 单章完成) THEN 系统 SHALL 把 session 标记为 `ended`
+6. WHEN UI 加载项目 THEN UI SHALL 显示该项目所有历史 session 的 token 累计统计
+
+**`budget_sessions` 表结构:**
+```typescript
+{
+  id, projectId,
+  mode: 'chapter' | 'autopilot',
+  tokenUsed: number,
+  maxTokens: number,
+  startedAt: timestamp,
+  endedAt: timestamp | null,
+  status: 'active' | 'ended' | 'aborted'
+}
+```
+
+### Requirement 29: RuntimeMode 差异化能力 — 阶段 1
+
+**User Story:** 作为浏览器用户,我知道标签页休眠会让长任务卡住,系统应该针对这点做保护。
+
+(修订自 REVIEW-2026-05 #14, D7 决策)
+
+#### Acceptance Criteria
+
+1. WHEN 系统启动 THEN 系统 SHALL 检测当前是 `browser` 还是 `tauri` 运行时,存入全局状态
+2. WHEN RuntimeMode='browser' THEN Auto-Pilot 单次会话 SHALL 限制最多 5 章
+3. WHEN RuntimeMode='browser' THEN 系统 SHALL 监听 `document.visibilitychange`,标签页隐藏 ≥5 分钟自动暂停 Auto-Pilot
+4. WHEN RuntimeMode='tauri' THEN 限制按 Req 14.7 (1 小时或 500K token)
+5. WHEN UI 显示模式徽章 THEN UI SHALL 在右下角显示当前 RuntimeMode (供用户感知)
 
 系统 Agent/UI 须使用如下标准错误码:
 
@@ -487,17 +833,18 @@ WorldBuilder → Character → Outliner
 ### 3.2 新增数据库表
 
 阶段 1 必须:
-- `agent_tasks` — Agent 任务记录
-- `agent_messages` — 消息总线持久化 (仅语义级事件)
-- `prompt_overrides` — 专家模式下的提示词覆盖
+- `agent_tasks` — Agent 任务记录 (含 phase/attempt/resumePoint, Req 21)
+- `agent_messages` — 消息总线持久化 (反范式: parentTaskId/agentName/chapterId, Review #5)
+- `prompt_overrides` — 专家模式下的提示词覆盖 (含 version, Req 27)
+- `chapter_commits` — Commit Journal (Req 19)
+- `budget_sessions` — Token 预算会话 (Req 28)
 
 阶段 2 新增:
 - `author_styles` — 作家风格指纹 (Humanizer 用)
-- `ai_detection_logs` — AI 率检测记录
+- `ai_detection_logs` — AI 率检测记录 + 本地 naturalnessMetrics
 
 阶段 3 新增:
 - `timeline` — 时间线事件
-- `entity_appearances` — 角色出场频次 (D3 用,可由 entities 表的字段代替)
 - `volume_archives` — 卷级归档 (Memory L4 用)
 
 ### 3.3 实体表扩展
@@ -505,7 +852,9 @@ WorldBuilder → Character → Outliner
 在 `entities` 表新增:
 - `level` — 角色等级 (L1/L2/L3),仅 type=character 有效
 - `appearanceCount` — 出场章节数
-- `anchor` — JSON,存储 Anchor 档案
+- `anchor` — JSON,存储 Anchor 档案 (vocabulary_signature, sentence_style, traits...)
+- `anchorStatus` — `'missing' | 'partial' | 'complete'` (Review #9, D6)
+- `anchorStrictEnabled` — boolean,用户可手动关闭某角色的严格 Anchor 校验
 - `lastAppearedChapter` — 最后出场章节序号
 - `levelManuallyLocked` — boolean,用户手动归档则禁止自动升级
 
@@ -543,7 +892,8 @@ WorldBuilder → Character → Outliner
 ### 阶段 2
 | 指标 | 目标 |
 |------|------|
-| 生成内容 AI 率 (本地+云端检测平均) | ≤ 30% |
+| 生成内容 detectorScore (云端检测器,仅作参考) | ≤ 30% |
+| 本地 naturalnessMetrics 综合评分 (Review #13) | ≥ 70/100 |
 | 角色性格一致性 (人工抽查 100 章) | ≥ 90% |
 | Memory 数据包 token 利用率 | ≥ 85% (避免过度裁剪) |
 

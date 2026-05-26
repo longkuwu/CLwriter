@@ -169,26 +169,29 @@ export abstract class BaseAgent<TInput, TOutput> {
     protected abstract defaultSystemPrompt(): string
     
     private async publishStart(ctx: AgentContext, input: TInput) {
+        // 生命周期事件 (Review #3): 统一 AGENT_STARTED, payload 标识 agentName
         await ctx.bus.publish({
-            type: `${this.name.toUpperCase()}_STARTED`,
+            type: 'AGENT_STARTED',
             taskId: ctx.taskId,
-            payload: { input }
+            payload: { agentName: this.name, input }
         })
     }
     
     private async publishDone(ctx: AgentContext, result: AgentResult<TOutput>) {
+        // 生命周期事件 — 不携带业务语义
+        // 业务语义事件由子类显式发布 (如 Writer 完成后发 DRAFT_READY)
         await ctx.bus.publish({
-            type: `${this.name.toUpperCase()}_DONE`,
+            type: 'AGENT_FINISHED',
             taskId: ctx.taskId,
-            payload: result
+            payload: { agentName: this.name, success: result.success, metrics: result.metrics }
         })
     }
     
     private async publishFailed(ctx: AgentContext, error: { code: string; message: string }) {
         await ctx.bus.publish({
-            type: `${this.name.toUpperCase()}_FAILED`,
+            type: 'AGENT_FAILED',
             taskId: ctx.taskId,
-            payload: { error }
+            payload: { agentName: this.name, error }
         })
     }
     
@@ -326,8 +329,9 @@ export class Orchestrator {
             }
         }
         
-        // 6. 全部完成
-        await this.bus.publish({ type: 'CHAPTER_FINALIZED', taskId: parentTask.id, payload: outputs })
+        // 6. 全部完成 — 发布运行时事件,不是业务事件 (Review #2)
+        // 业务事件 CHAPTER_FINALIZED 由 Continuity Agent 唯一发布
+        await this.bus.publish({ type: 'PIPELINE_COMPLETED', taskId: parentTask.id, payload: outputs })
     }
     
     private makeCtx(parent: Task, stepName: string): AgentContext { /* ... */ }
@@ -408,7 +412,9 @@ class DirectorAgent extends BaseAgent<DirectorInput, DirectorOutput> {
 **职责:**
 - 接收 blueprint + memoryPack
 - 调用 LLM 流式生成正文 + CHANGES
-- CHANGES 解析失败时自重试 (Req 4.4)
+- CHANGES 解析失败时自重试 (Req 4.5)
+- **节流式草稿快照防止刷新丢失 (Req 20, Review #7)**
+- **AbortSignal 集成实现可靠取消 (Req 25, Review #17)**
 
 **实现要点:**
 ```typescript
@@ -418,43 +424,99 @@ class WriterAgent extends BaseAgent<WriterInput, WriterOutput> {
     
     protected async run(ctx: AgentContext, input: WriterInput): Promise<WriterOutput> {
         const systemPrompt = this.buildSystemPrompt(input)
-        const userPrompt = this.buildUserPrompt(input)
+        let userPrompt = this.buildUserPrompt(input)
         
         for (let attempt = 1; attempt <= 3; attempt++) {
+            // 取消检查 (Req 25)
+            ctx.abortSignal.throwIfAborted()
+            
+            // 更新 attempt + phase
+            await updateTaskState(ctx.taskId, { phase: 'streaming', attempt })
+            
             // 流式调用
             let fullText = ''
+            let lastSnapshotAt = Date.now()
+            let lastSnapshotLen = 0
+            
             await streamChatCompletion(
                 [{ role: 'system', content: systemPrompt }, { role: 'user', content: userPrompt }],
                 {
-                    onChunk: (chunk) => {
+                    onChunk: async (chunk) => {
                         fullText += chunk
-                        // in-memory 转发到总线 (不持久化)
+                        
+                        // STREAM_CHUNK 事件 (in-memory only, Req 4.2)
                         ctx.bus.publish({
-                            type: 'WRITER_CHUNK',
+                            type: 'STREAM_CHUNK',
                             taskId: ctx.taskId,
-                            payload: { chunk }
+                            payload: { agentName: 'writer', chunk }
                         })
+                        
+                        // 节流式快照 (Req 20, Review #7): 每 500 字 OR 每 2 秒
+                        const now = Date.now()
+                        if (fullText.length - lastSnapshotLen >= 500 || now - lastSnapshotAt >= 2000) {
+                            await persistTempDraft(ctx.taskId, fullText)
+                            ctx.bus.publish({
+                                type: 'STREAM_DRAFT_SNAPSHOT',
+                                taskId: ctx.taskId,
+                                payload: { agentName: 'writer', length: fullText.length }
+                            })
+                            lastSnapshotAt = now
+                            lastSnapshotLen = fullText.length
+                        }
                     },
                     onDone: () => {},
                     onError: (e) => { throw makeError('E_LLM_TIMEOUT', e) }
-                }
+                },
+                { signal: ctx.abortSignal }  // 取消机制 (Req 25)
             )
             
+            // 取消检查 (在落库前再次确认, Review #17)
+            ctx.abortSignal.throwIfAborted()
+            await assertTaskNotCancelled(ctx.taskId)
+            
             // 解析 CHANGES
+            await updateTaskState(ctx.taskId, { phase: 'parsing' })
             const parsed = parseChanges(fullText)
             if (parsed.success) {
+                // 清理 tempDraft
+                await clearTempDraft(ctx.taskId)
+                
+                // 业务事件 — Writer 显式发布 (Review #3)
+                await ctx.bus.publish({
+                    type: 'DRAFT_READY',
+                    taskId: ctx.taskId,
+                    payload: { agentName: 'writer', body: parsed.body, changes: parsed.changes }
+                })
+                
                 return { body: parsed.body, changes: parsed.changes, raw: fullText }
             }
             
-            // 重试时附加反馈
+            // 重试: 附加反馈 + 进入 retrying phase
+            await updateTaskState(ctx.taskId, { phase: 'retrying' })
             userPrompt = this.appendRetryFeedback(userPrompt, parsed.error, attempt)
         }
         
         throw makeError('E_PROTOCOL_PARSE_FAILED', 'CHANGES 解析连续 3 次失败')
     }
     
+    /** 处理 RewriteRequest (Req 23, 由 Critic/Anchor 触发) */
+    async handleRewriteRequest(ctx: AgentContext, req: RewriteRequest, prevDraft: WriterOutput): Promise<WriterOutput> {
+        if (req.mode === 'full') {
+            // 整章重写: 把 feedback 附加到 prompt
+            return this.run(ctx, { ...prevDraft.input, feedback: req.feedback })
+        }
+        // 局部重写: 只改 targetRanges,保留其他
+        // 注意: 局部重写后 CHANGES 必须重新校验 (Req 23.5)
+        const newBody = await this.localRewrite(ctx, prevDraft.body, req.targetRanges!)
+        if (req.preserveChanges) {
+            return { body: newBody, changes: prevDraft.changes, raw: newBody }
+        }
+        // 重新生成 CHANGES
+        return this.regenerateChanges(ctx, newBody)
+    }
+    
     protected defaultSystemPrompt(): string {
-        return PROMPT_WRITER_DEFAULT  // 引用 v2.0 的 engine/prompts/chapter
+        return PROMPT_WRITER_DEFAULT
     }
 }
 ```
@@ -496,7 +558,8 @@ class CriticAgent extends BaseAgent<CriticInput, CriticOutput> {
 
 #### 2.5.4 Continuity Agent
 
-**复用 v2.0 的 6 道门禁,改造为 Agent 接口:**
+**复用 v2.0 的 6 道门禁 + 走 commit journal 流程 (Review #1):**
+
 ```typescript
 class ContinuityAgent extends BaseAgent<ContinuityInput, ContinuityOutput> {
     name = 'continuity'
@@ -506,7 +569,8 @@ class ContinuityAgent extends BaseAgent<ContinuityInput, ContinuityOutput> {
         const { body, changes, blueprint } = input
         const prevSnapshot = await getLatestSnapshot(ctx.projectId)
         
-        // 直接用 v2.0 引擎
+        // Phase 1: 验证 (复用 v2.0 引擎)
+        await updateTaskPhase(ctx.taskId, 'validating')
         const orchResult = await runAllGates({
             projectId: ctx.projectId,
             chapterId: input.chapterId,
@@ -521,24 +585,110 @@ class ContinuityAgent extends BaseAgent<ContinuityInput, ContinuityOutput> {
             throw makeError('E_GATE_FAILED', buildGateFeedback(orchResult))
         }
         
-        // 原子事务
-        await this.commitTransaction(ctx, input, prevSnapshot)
+        // Phase 2: Commit Journal (Review #1)
+        await updateTaskPhase(ctx.taskId, 'committing')
+        const newSnap = projectSnapshot(prevSnapshot, input.changes, input.chapterId, input.chapterOrder)
+        await this.commitWithJournal(ctx, input, newSnap)
+        
+        // 业务事件 — 唯一发布者
+        await ctx.bus.publish({
+            type: 'CHAPTER_FINALIZED',
+            taskId: ctx.taskId,
+            payload: { chapterId: input.chapterId, gateResults: orchResult.results }
+        })
         
         return { gateResults: orchResult.results, snapshotUpdated: true }
     }
     
-    private async commitTransaction(ctx: AgentContext, input: ContinuityInput, prev: FactSnapshot | null) {
-        const db = await getDatabase()
-        // PGlite 不支持显式事务,但操作顺序保证一致性
-        // 1. 更新章节文件 (draft → final)
-        await updateFile(input.chapterId, { content: input.body })
-        // 2. 写入 CHANGES
-        await insertChapterChange(input.chapterId, input.changes)
-        // 3. 投影快照
-        const newSnap = projectSnapshot(prev, input.changes, input.chapterId, input.chapterOrder)
-        await saveSnapshot(ctx.projectId, newSnap)
-        // 4. 更新角色 appearanceCount + 触发等级升级
-        await this.updateAppearanceCounts(ctx.projectId, input.changes, input.chapterOrder)
+    /**
+     * 提交日志流程 (修订自 REVIEW-2026-05 #1):
+     * 1. 在 chapter_commits 表写 'preparing' 记录
+     * 2. status='committing',按顺序执行写入,每步更新 currentStep
+     * 3. 全部成功 → status='committed'
+     * 4. 任何步骤失败 → status='failed' + 记录失败步骤
+     *
+     * 启动时由 recoverChapterCommits() 扫描未完成 commit,继续或标记 pending_review
+     */
+    private async commitWithJournal(
+        ctx: AgentContext,
+        input: ContinuityInput,
+        newSnap: FactSnapshot
+    ): Promise<void> {
+        const steps = ['updateFile', 'insertChange', 'saveSnapshot', 'updateAppearance']
+        
+        // 1. preparing
+        const commitId = await createCommit({
+            projectId: ctx.projectId,
+            parentTaskId: ctx.parentTaskId,
+            chapterId: input.chapterId,
+            steps,
+            payload: {
+                body: input.body,
+                changes: input.changes,
+                snapshot: newSnap,
+                appearanceUpdates: this.calcAppearanceUpdates(input.changes, input.chapterOrder)
+            }
+        })
+        
+        try {
+            await markCommitting(commitId)
+            
+            // 2. 顺序执行,每步原子更新 currentStep
+            for (let i = 0; i < steps.length; i++) {
+                // 取消检查 (Req 25)
+                await assertTaskNotCancelled(ctx.taskId)
+                
+                await this.executeStep(steps[i], commitId, input, newSnap)
+                await updateCommitStep(commitId, i + 1)
+            }
+            
+            // 3. 全部成功
+            await markCommitted(commitId)
+        } catch (e) {
+            // 4. 失败 — 不抛出,改为标记 failed,由 Director 决策
+            await markFailed(commitId, steps[/* current */], e)
+            throw e  // 上抛让 Agent.execute() 走 onError
+        }
+    }
+    
+    private async executeStep(stepName: string, commitId: string, input: ContinuityInput, newSnap: FactSnapshot) {
+        switch (stepName) {
+            case 'updateFile':
+                return updateFile(input.chapterId, { content: input.body })
+            case 'insertChange':
+                return insertChapterChange(input.chapterId, input.changes)
+            case 'saveSnapshot':
+                return saveSnapshot(commitId, newSnap)
+            case 'updateAppearance':
+                return updateAppearanceCounts(input.chapterId, input.changes)
+            default:
+                throw new Error(`Unknown commit step: ${stepName}`)
+        }
+    }
+    
+    private calcAppearanceUpdates(changes: Changes, chapterOrder: number) {
+        // 根据 changes 算出哪些角色出场,准备 appearance 更新
+        return changes.charactersAppeared.map(charId => ({
+            charId, increment: 1, lastChapter: chapterOrder
+        }))
+    }
+}
+```
+
+**未完成 commit 的恢复 (启动时调用):**
+
+```typescript
+// lib/agents/core/recovery.ts
+export async function recoverChapterCommits(): Promise<void> {
+    const db = await getDatabase()
+    const stuck = await db.select()
+        .from(chapterCommits)
+        .where(inArray(chapterCommits.status, ['preparing', 'committing']))
+    
+    for (const commit of stuck) {
+        // UI 提示用户: "检测到未完成的章节落地 (第 X 章, 已完成 N/M 步)"
+        // 用户选择: 继续 / 标记 pending_review
+        notifyUserOfStuckCommit(commit)
     }
 }
 ```
@@ -551,17 +701,21 @@ class ContinuityAgent extends BaseAgent<ContinuityInput, ContinuityOutput> {
 export const agentTasks = pgTable('agent_tasks', {
     id: uuid('id').primaryKey().defaultRandom(),
     projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
-    parentTaskId: uuid('parent_task_id'),  // null = 父任务,否则指向父任务 ID
-    type: text('type').notNull(),  // 'generate-chapter' | 'writer' | 'critic' | ...
-    status: text('status').notNull().default('pending'),  // pending/running/done/failed/cancelled
+    parentTaskId: uuid('parent_task_id'),
+    type: text('type').notNull(),
+    
+    // 状态机 (Req 21, Review #6)
+    status: text('status').notNull().default('pending'),  // pending/running/done/failed/cancelled/pending_review
+    phase: text('phase'),  // streaming/parsing/validating/committing/waiting_user 等,完成时为 NULL
+    resumePoint: text('resume_point'),  // 自定义恢复点字符串
+    attempt: integer('attempt').notNull().default(0),
     
     chapterId: uuid('chapter_id').references(() => files.id),
     
     input: jsonb('input'),
-    output: jsonb('output'),
-    error: jsonb('error'),  // { code, message }
-    
-    metrics: jsonb('metrics'),  // { tokens, durationMs }
+    output: jsonb('output'),  // 含 tempDraft 等流式快照 (Req 20)
+    error: jsonb('error'),
+    metrics: jsonb('metrics'),
     
     createdAt: timestamp('created_at').defaultNow().notNull(),
     startedAt: timestamp('started_at'),
@@ -570,33 +724,81 @@ export const agentTasks = pgTable('agent_tasks', {
     projectIdx: index('agent_tasks_project_idx').on(table.projectId),
     parentIdx: index('agent_tasks_parent_idx').on(table.parentTaskId),
     statusIdx: index('agent_tasks_status_idx').on(table.status),
+    phaseIdx: index('agent_tasks_phase_idx').on(table.status, table.phase),
 }))
 
+// agent_messages 反范式扩展 (Review #5)
 export const agentMessages = pgTable('agent_messages', {
     id: uuid('id').primaryKey().defaultRandom(),
+    
+    // 反范式字段,UI/审计/恢复用
+    projectId: uuid('project_id').notNull(),
+    parentTaskId: uuid('parent_task_id'),  // 父任务 ID
     taskId: uuid('task_id').notNull().references(() => agentTasks.id, { onDelete: 'cascade' }),
-    type: text('type').notNull(),  // 事件名
+    chapterId: uuid('chapter_id'),
+    agentName: text('agent_name'),  // 'writer' | 'critic' | ...
+    
+    type: text('type').notNull(),  // 事件名 (生命周期 / 业务语义)
     payload: jsonb('payload'),
     createdAt: timestamp('created_at').defaultNow().notNull(),
 }, (table) => ({
     taskIdx: index('agent_messages_task_idx').on(table.taskId),
+    parentIdx: index('agent_messages_parent_idx').on(table.parentTaskId),
     typeIdx: index('agent_messages_type_idx').on(table.type),
+    projectIdx: index('agent_messages_project_idx').on(table.projectId),
 }))
 
+// prompt_overrides 版本化 (Req 27, Review #16)
 export const promptOverrides = pgTable('prompt_overrides', {
     id: uuid('id').primaryKey().defaultRandom(),
     projectId: uuid('project_id').notNull().references(() => projects.id, { onDelete: 'cascade' }),
-    agentName: text('agent_name').notNull(),  // 'writer' | 'critic' | ...
+    agentName: text('agent_name').notNull(),
+    version: integer('version').notNull(),
     promptTemplate: text('prompt_template').notNull(),
+    isActive: boolean('is_active').notNull().default(true),
+    validationErrors: jsonb('validation_errors').default([]),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
     updatedAt: timestamp('updated_at').defaultNow().notNull(),
 }, (table) => ({
-    uniqueIdx: uniqueIndex('prompt_overrides_unique').on(table.projectId, table.agentName),
+    activeIdx: index('prompt_overrides_active_idx').on(table.projectId, table.agentName, table.isActive),
 }))
 
-// 扩展 entities 表
-// 注意: PGlite 不支持 ALTER TABLE 添加 NOT NULL 列,需要用 db migration
-// 实际实现时通过 drizzle-kit 生成 migration
-```
+// chapter_commits — Commit Journal (Req 19, Review #1)
+export const chapterCommits = pgTable('chapter_commits', {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    parentTaskId: uuid('parent_task_id').notNull(),
+    chapterId: uuid('chapter_id').notNull(),
+    
+    status: text('status').notNull(),  // preparing/committing/committed/failed
+    currentStep: integer('current_step').notNull().default(0),
+    steps: jsonb('steps').$type<string[]>().notNull(),  // ['updateFile', 'insertChange', 'saveSnapshot', ...]
+    payload: jsonb('payload').notNull(),  // 完整待写入数据
+    
+    failedAt: timestamp('failed_at'),
+    failedStep: text('failed_step'),
+    failedError: jsonb('failed_error'),
+    
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+    statusIdx: index('chapter_commits_status_idx').on(table.status),
+    chapterIdx: index('chapter_commits_chapter_idx').on(table.chapterId),
+}))
+
+// budget_sessions — Token 预算 (Req 28, Review #18)
+export const budgetSessions = pgTable('budget_sessions', {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id').notNull(),
+    mode: text('mode').notNull(),  // 'chapter' | 'autopilot'
+    tokenUsed: integer('token_used').notNull().default(0),
+    maxTokens: integer('max_tokens').notNull(),
+    status: text('status').notNull().default('active'),  // active | ended | aborted
+    startedAt: timestamp('started_at').defaultNow().notNull(),
+    endedAt: timestamp('ended_at'),
+}, (table) => ({
+    activeIdx: index('budget_sessions_active_idx').on(table.projectId, table.status),
+}))
 
 ### 2.7 UI 设计 — Director 工作台
 
@@ -884,14 +1086,69 @@ tests/e2e/
 
 **理由:** 单点决策避免逻辑复杂化。Director 可以根据全局上下文 (用户模式、累计 Token、连续失败次数) 做更聪明的决策,而单个 Agent 只看自己。
 
-### ADR-003: 为什么 Continuity 要做"原子事务",但 PGlite 不支持显式事务?
+### ADR-003: 章节落地的"两阶段提交日志" (commit journal)
 
-**背景:** Req 6.2 / Req 15.7。
+**背景:** Req 19 / Review #1。PGlite 不支持显式事务,但章节落地涉及多步写入,中断会破坏一致性。
 
-**对策:** 严格按顺序执行操作 (章节 → CHANGES → 快照 → appearanceCount),并在写失败时主动 rollback (即删除已写部分)。后续 PGlite 支持事务后再升级。
+**对策:**
+1. 落地前先在 `chapter_commits` 表写 `preparing` 记录,包含完整 payload
+2. 进入 `committing`,按顺序执行写入,每步原子更新 `currentStep`
+3. 全部完成 → `committed`
+4. 任何步骤失败 → `failed`,记录失败步骤
+5. 启动时扫描 stuck 状态的 commit,提示用户继续或标记 `pending_review`
+
+**为什么不用"反向 rollback":** 反向 rollback 假设崩溃时 rollback 代码能跑,但实际上崩溃后 rollback 也无法执行。Commit Journal 是经典的解决方案 (类似数据库 WAL)。
+
+**与 PGlite 后续支持事务的迁移路径:** 如果 PGlite 未来支持事务,可保留 commit_journal 作为审计层,把内部 4 步操作改为单个事务。
 
 ### ADR-004: 为什么阶段 1 的 ChapterPlanner 是"占位"?
 
 **背景:** 阶段 1 用户可能没有完整大纲。
 
 **对策:** MVP 用静态模板 (例如"接续上一章,推进 1-2 个剧情点"),阶段 3 实现智能 ChapterPlanner 后无缝替换。
+
+### ADR-005: 生命周期事件与业务语义事件的命名空间分离
+
+**背景:** Review #3。BaseAgent 自动发布 `<NAME>_DONE` 等事件,但需求里有 `DRAFT_READY` 这种业务语义事件,两套并存会混乱。
+
+**对策:**
+- 生命周期事件统一为 `AGENT_STARTED / AGENT_FINISHED / AGENT_FAILED / AGENT_PROGRESS / STREAM_CHUNK / STREAM_DRAFT_SNAPSHOT`,payload 中标识 `agentName`
+- 业务语义事件由 Agent 显式发布,事件名为业务里程碑 (`DRAFT_READY` `CRITIQUED_READY` `CHAPTER_FINALIZED` 等)
+- UI 监听生命周期事件做"运行时显示"
+- 流水线 Agent 监听业务事件做"业务推进"
+- 业务判断不能用 `AGENT_FINISHED` 推断结果
+
+### ADR-006: agent_messages 反范式存储
+
+**背景:** Review #5。如果只存 `taskId`,UI 订阅父任务事件需要递归查所有子任务消息,复杂且性能差。
+
+**对策:** 在 agent_messages 表冗余存储 `parentTaskId / projectId / chapterId / agentName`。这是事件溯源场景的标准做法,反范式带来的写入成本远低于查询便利的收益。
+
+### ADR-007: TokenBudget 由调用方主导
+
+**背景:** Req 22 / Review #12。Memory 不应该自己决定全局 token 预算。
+
+**对策:**
+1. 协议蓝图层提供 `getModelContextLimit()`
+2. 上游调用方 (Director / Orchestrator) 通过 `TokenBudgetService.allocate()` 分配各部分预算
+3. Memory 接收 `maxTokens` 参数,只在该预算内构建 Pack
+4. 避免分散式 token 估算导致总和超限
+
+### ADR-008: Humanizer 主决策依据是 naturalnessMetrics 而非 detectorScore
+
+**背景:** Review #13。AI 检测器结果不稳定,把它当作通过条件不可靠。
+
+**对策:**
+- 主决策依据: 本地可计算的 `naturalnessMetrics` (重复率/句长方差/禁用词命中等)
+- 辅助参考: 云端 `detectorScore` (可缺失,失败时不阻塞但**不**直接通过)
+- 验收指标对应改成两套 (阶段 2 成功标准已更新)
+
+### ADR-009: RuntimeMode 是能力差异不是架构差异
+
+**背景:** Review #14 / D7 决策。
+
+**对策:**
+- 检测当前是 browser 还是 tauri 运行时,UI 展示徽章
+- Auto-Pilot 在 browser 模式下额外限制 (5 章 / 标签页隐藏 5 分钟暂停)
+- 不引入 Tauri sidecar,所有 Agent 仍跑在 TypeScript 客户端
+- 如果未来用户量大且需要更稳长任务,再考虑 sidecar 重构

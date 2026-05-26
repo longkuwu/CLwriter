@@ -22,16 +22,21 @@ CLwriter — AI 多 Agent 协作小说创作平台,专为长篇小说写作优�
 2. 长篇记忆混乱 → 引入分层记忆 + Anchor + Timekeeper
 3. 单 Agent 样样不精 → 7 个专业 Agent 各司其职
 
+**⚠️ 关键: spec 已经过两次大修订:**
+- 初版 18 条 Requirement → 修订加到 18 条 (含 D5 拆分)
+- 用户审计发现 18 个问题 → 必改 14 条 + 改但缩范围 3 条 + 延后 1 条 → 现在共 29 条 Requirement
+- **审计原文存档在 [REVIEW-2026-05.md](./REVIEW-2026-05.md)**,实施时遇到设计疑问优先看这个
+
 ### 现在做到哪一步了?
 
 ✅ **已完成**:
 - v2.0 状态驱动引擎 (15 维快照 + CHANGES + 6 道门禁) — 完整可用
 - 协议蓝图系统 (支持 OpenAI/NewAPI/Anthropic/Gemini/Ollama 等 12 种协议) — 完整可用
 - 模型扫描器 + 端点自动发现 (借鉴天命算法) — 完整可用
-- 重构方案设计文档 — 完整可用 (本目录)
+- 重构方案设计文档 — **已修订到 v2 (审计后)**
 
 🚧 **进行中**:
-- Spec 三件套已写完: requirements.md, design.md, tasks.md
+- Spec 三件套已修订完: requirements.md, design.md, tasks.md
 - 等待开始实施阶段 1 (MVP)
 
 ⛔ **未开始**:
@@ -242,9 +247,10 @@ git push
 
 | 想做什么 | 看哪里 |
 |---------|-------|
-| 理解需求 | `requirements.md` (18 条 Requirement + §1.5 关键决策) |
-| 理解技术方案 | `design.md` (重点 §2 阶段 1) |
+| 理解需求 | `requirements.md` (29 条 Requirement + §1.5 关键决策 D1-D7) |
+| 理解技术方案 | `design.md` (重点 §2 阶段 1 + §九 ADR-001~009) |
 | 找下一个任务 | `tasks.md` (从上往下做) |
+| **理解为什么这样设计** | **`REVIEW-2026-05.md` (18 个审计问题 + 14 个必改修订)** |
 | 看 v2.0 引擎怎么用 | `src/lib/engine/index.ts` (看导出的接口) |
 | 看 LLM 怎么调 | `src/lib/ai/protocol/client.ts` (chatCompletion + streamChatCompletion) |
 | 看现有数据库 | `src/lib/db/schema.ts` |
@@ -307,29 +313,87 @@ git push
 
 ## 8. 已知问题与陷阱
 
+> 这一节非常重要,实施时一定要看!很多坑都是用户审计 (2026-05) 时发现的,详见 [REVIEW-2026-05.md](./REVIEW-2026-05.md)。
+
 ### 8.1 Build 警告
 
 `next.config.mjs` 临时关闭了 type check 和 ESLint,因为 v2.0 历史代码有大量 strict mode 不达标。**v3.0 新代码必须严格 type check**,实施完阶段 1 后建议把开关打开,逐步修历史代码。
 
-### 8.2 PGlite 不支持显式事务
+### 8.2 PGlite 不支持显式事务 → 必须用 Commit Journal
 
-`BEGIN/COMMIT/ROLLBACK` 在 PGlite 不可用。Continuity Agent 的"原子事务"实际上是顺序操作 + 失败回滚 (反向删除已写部分)。详见 design.md ADR-003。
+`BEGIN/COMMIT/ROLLBACK` 在 PGlite 不可用。**禁止**用"反向 rollback"伪装成原子事务 — 那在崩溃时根本不可靠。
+
+正确做法: **Commit Journal** (Req 19, ADR-003)。先在 `chapter_commits` 表写 'preparing',按步执行,失败时记录哪一步失败,启动时扫描 stuck 状态。
 
 ### 8.3 流式输出与干预模式冲突
 
 如果用户在 Writer 流式输出过程中切到干预模式,**不能中途暂停**,会丢失内容。Req 7.4 明确流式过程中不暂停,流式结束后才暂停。实施时注意这个边界。
 
-### 8.4 模型扫描的 16 字节响应
+### 8.4 Writer 流式必须节流式持久化草稿
+
+不能直接把每个 chunk 写 DB (会膨胀),也不能不写 (刷新会丢正文)。
+
+正确做法: **每 500 字 OR 每 2 秒** 把累计文本写入 `agent_tasks.output.tempDraft` (Req 20)。完成时清理。恢复时询问用户是否基于 tempDraft 继续。
+
+### 8.5 模型扫描的 16 字节响应
 
 某些中转服务的 `/v1/models` 返回 `{"success":true}` (16 字节) 不带 data 数组。当前协议蓝图系统会把这种识别为"扫描失败但端点存在",提示用户手动填模型 ID。详见 `src/lib/ai/protocol/endpoint-discovery.ts`。
 
-### 8.5 Auto-Pilot 累计 Token 超 500K 强制暂停
+### 8.6 Auto-Pilot 累计 Token 超 500K 强制暂停
 
-Req 14.7 / 17.6 要求,实施时千万别忘,否则用户可能被炸账单。
+Req 14.7 / 17.6 要求,通过独立的 `budget_sessions` 表跨任务原子累计 (Req 28)。**不能**只从 `agent_tasks.metrics` 临时聚合,容易漏。
 
-### 8.6 Codex 风格 API 用 /responses 不是 /chat/completions
+### 8.7 Codex 风格 API 用 /responses 不是 /chat/completions
 
 如果用户配的是 `https://xxx/codex` 这种,需要选 "NewAPI Codex 中转 (Codex 风格)" 协议蓝图,使用 `/responses` 端点。详见 `src/lib/ai/protocol/presets.ts`。
+
+### 8.8 事件命名空间必须分离
+
+**禁止**把 `<NAME>_DONE` 当作业务判断依据。
+
+- 生命周期事件 (`AGENT_STARTED/FINISHED/FAILED/...`) 仅 UI 用
+- 业务语义事件 (`DRAFT_READY/CRITIQUED_READY/CHAPTER_FINALIZED/...`) Agent 间流转用
+
+`AGENT_FINISHED` ≠ `DRAFT_READY` (Review #3, ADR-005)
+
+### 8.9 CHAPTER_FINALIZED 唯一发布者是 Continuity
+
+Orchestrator 完成流水线只发 `PIPELINE_COMPLETED` (运行时事件),**不**发 `CHAPTER_FINALIZED`。后者是 Continuity Agent 完成 commit journal 后唯一发布。混发会导致状态错乱。(Review #2, ADR-005)
+
+### 8.10 角色等级与 Anchor 完整度是两个独立维度
+
+L1/L2/L3 是 `entities.level`。完整度是 `entities.anchorStatus` (`missing/partial/complete`)。
+
+**Anchor 校验决策依据是组合二者** (D6 决策表),不能只看 level。这避免"角色等级 L1 但 Anchor 是空的"诡异状态。(Review #9)
+
+### 8.11 D5 章节生成前置条件 ≠ Anchor 必须完整
+
+阶段 1 没有 Anchor Agent,所以 `checkPrerequisites()` 只能检查"基础门槛":
+- ≥1 个 character 实体 (任何等级)
+- ≥1 条世界观规则
+- LLM 已配置
+
+**不要写**"L1 角色必须有完整 Anchor",这是阶段 2 才有的能力。(Review #8)
+
+### 8.12 取消机制必须落到 LLM 调用层
+
+只在 Agent 层加 `abortSignal` 不够,LLM 调用 (`fetch` / `streamChatCompletion`) **必须传入 signal**。
+
+非流式调用 abort 后结果可能仍返回,所以**落库前必须再次** `assertTaskNotCancelled(taskId)`,如已取消则丢弃结果。(Review #17, Req 25)
+
+### 8.13 局部重写后 CHANGES 必须重新校验
+
+Critic 请求 Writer 局部重写时,**默认**会重新生成 CHANGES (`preserveChanges=false`)。只有在明确知道改动不影响状态 (如修标点/排版) 时才能 `preserveChanges=true`。
+
+如果忘了重新生成 CHANGES,正文和状态变更会不一致,长篇必出 bug。(Review #10, Req 23)
+
+### 8.14 Critic 输出必须 Zod 校验
+
+LLM 输出 JSON 经常格式不稳定,**禁止**直接用 `JSON.parse()` 信任结果。必须用 `CriticResultSchema` 严格校验,失败重试 2 次后强制通过 (70 分) + 标记 pending_review。(Review #11, Req 24)
+
+### 8.15 AI 率不是可靠工程指标
+
+不能把"AI 率 ≤ 30%"作为通过条件。检测器结果不稳定,主决策依据应是本地可计算的 `naturalnessMetrics`,云端 `detectorScore` 仅作参考。(Review #13, ADR-008)
 
 ---
 
@@ -388,4 +452,4 @@ Req 14.7 / 17.6 要求,实施时千万别忘,否则用户可能被炸账单。
 - 修改 spec: 同步更新本文档相关引用
 - 发现新陷阱: 加到 §8 "已知问题与陷阱"
 
-**最后更新**: 2026-05 (v3.0 spec 三件套完成,等待实施)
+**最后更新**: 2026-05 (v3.0 spec 第二轮修订完成 - 含 18 项审计修复, 等待实施)
