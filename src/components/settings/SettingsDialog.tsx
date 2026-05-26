@@ -76,6 +76,9 @@ export default function SettingsDialog() {
     const [scanning, setScanning] = useState(false)
     const [scannedModels, setScannedModels] = useState<ScannedModelLite[]>([])
     const [scanError, setScanError] = useState<string | null>(null)
+    const [scanDebug, setScanDebug] = useState<{ url: string; status?: number; sample?: string } | null>(null)
+    const [showDebug, setShowDebug] = useState(false)
+    const [suggestedBaseUrl, setSuggestedBaseUrl] = useState<string | null>(null)
     const [showModelDropdown, setShowModelDropdown] = useState(false)
     const [modelSearch, setModelSearch] = useState('')
     const [editingBlueprint, setEditingBlueprint] = useState<ProtocolBlueprint | null>(null)
@@ -133,6 +136,8 @@ export default function SettingsDialog() {
 
         setScanning(true)
         setScanError(null)
+        setScanDebug(null)
+        setSuggestedBaseUrl(null)
         setScannedModels([])
 
         try {
@@ -140,8 +145,13 @@ export default function SettingsDialog() {
             if (r.success) {
                 setScannedModels(r.models)
                 setShowModelDropdown(true)
+                // 如果是用兜底 baseUrl 扫到的,提示用户更新
+                if (r.suggestedBaseUrl) {
+                    setSuggestedBaseUrl(r.suggestedBaseUrl)
+                }
             } else {
                 setScanError(r.error || '扫描失败')
+                if (r.debug) setScanDebug(r.debug)
             }
         } catch (e) {
             setScanError(e instanceof Error ? e.message : '未知错误')
@@ -297,8 +307,28 @@ export default function SettingsDialog() {
                                 type="text"
                                 placeholder={currentBlueprint?.defaultBaseUrl || 'https://...'}
                                 value={baseUrl}
-                                onChange={(e) => setBaseUrl(e.target.value)}
+                                onChange={(e) => {
+                                    setBaseUrl(e.target.value)
+                                    setSuggestedBaseUrl(null)
+                                }}
                             />
+                            {suggestedBaseUrl && suggestedBaseUrl !== baseUrl && (
+                                <div className="flex items-center justify-between gap-2 p-2 rounded bg-emerald-500/10 border border-emerald-500/30">
+                                    <div className="text-xs text-emerald-400 flex-1 min-w-0">
+                                        ✨ 检测到正确的 Base URL:
+                                        <code className="ml-1 font-mono break-all">{suggestedBaseUrl}</code>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            setBaseUrl(suggestedBaseUrl)
+                                            setSuggestedBaseUrl(null)
+                                        }}
+                                        className="text-[11px] px-2 py-0.5 rounded bg-emerald-500 text-white hover:bg-emerald-600 shrink-0"
+                                    >
+                                        采用
+                                    </button>
+                                </div>
+                            )}
                         </div>
 
                         {/* API Key */}
@@ -351,11 +381,46 @@ export default function SettingsDialog() {
                             </div>
 
                             {scanError && (
-                                <div className="flex items-start gap-2 p-2 rounded bg-red-500/10 border border-red-500/30 text-xs text-red-400">
-                                    <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                                    <div>
-                                        <div className="font-medium">扫描失败</div>
-                                        <div className="text-[11px] opacity-80">{scanError}</div>
+                                <div className="space-y-1.5">
+                                    <div className="flex items-start gap-2 p-2 rounded bg-red-500/10 border border-red-500/30 text-xs text-red-400">
+                                        <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                                        <div className="flex-1">
+                                            <div className="font-medium">扫描失败</div>
+                                            <div className="text-[11px] opacity-80 break-all">{scanError}</div>
+                                        </div>
+                                    </div>
+
+                                    {scanDebug && (
+                                        <div className="rounded border border-border/50 bg-accent/30 text-[10px] overflow-hidden">
+                                            <button
+                                                onClick={() => setShowDebug(!showDebug)}
+                                                className="w-full px-2 py-1 flex items-center justify-between hover:bg-accent/50 text-muted-foreground"
+                                            >
+                                                <span>🔍 调试信息 (点击{showDebug ? '收起' : '展开'})</span>
+                                                <ChevronDown className={cn('h-3 w-3 transition-transform', showDebug && 'rotate-180')} />
+                                            </button>
+                                            {showDebug && (
+                                                <div className="px-2 py-2 space-y-1 border-t border-border/50">
+                                                    <div>
+                                                        <span className="text-muted-foreground">实际请求 URL:</span>
+                                                        <div className="font-mono break-all bg-background/50 px-1.5 py-1 rounded mt-0.5">{scanDebug.url}</div>
+                                                    </div>
+                                                    {scanDebug.sample && (
+                                                        <div>
+                                                            <span className="text-muted-foreground">响应预览:</span>
+                                                            <pre className="font-mono break-all bg-background/50 px-1.5 py-1 rounded mt-0.5 max-h-32 overflow-auto whitespace-pre-wrap">{scanDebug.sample}</pre>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <div className="text-[10px] text-muted-foreground space-y-0.5 pl-1">
+                                        <div>💡 常见解决方案:</div>
+                                        <div className="pl-3">• 检查 Base URL 是否带了 <code className="font-mono bg-accent/40 px-1 rounded">/v1</code> 等版本前缀</div>
+                                        <div className="pl-3">• 检查 API Key 是否正确</div>
+                                        <div className="pl-3">• 中转服务一般是 OpenAI 兼容,可换成「OpenAI 兼容」或「NewAPI」协议</div>
                                     </div>
                                 </div>
                             )}

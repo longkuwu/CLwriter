@@ -46,7 +46,7 @@ export const PRESET_NEWAPI: ProtocolBlueprint = {
     description: 'NewAPI / OneAPI / FastAPI-LLM 等中转服务,OpenAI 兼容协议',
     icon: '🔀',
     builtIn: true,
-    defaultBaseUrl: 'https://your-newapi-domain.com/v1',
+    defaultBaseUrl: '',  // 用户必须填自己的中转域名
     auth: {
         location: 'header',
         name: 'Authorization',
