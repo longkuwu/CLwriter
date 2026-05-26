@@ -47,6 +47,7 @@ import {
     generateBlueprintId
 } from '@/lib/ai/protocol/storage'
 import { listModelsByBlueprint } from '@/lib/ai/protocol/client'
+import { testConnection, type TestResult } from '@/lib/ai/protocol/test-connection'
 import type { ProtocolBlueprint } from '@/lib/ai/protocol/types'
 import { cn } from '@/lib/utils'
 import BlueprintEditor from './BlueprintEditor'
@@ -76,9 +77,13 @@ export default function SettingsDialog() {
     const [scanning, setScanning] = useState(false)
     const [scannedModels, setScannedModels] = useState<ScannedModelLite[]>([])
     const [scanError, setScanError] = useState<string | null>(null)
-    const [scanDebug, setScanDebug] = useState<{ url: string; status?: number; sample?: string } | null>(null)
+    const [scanDebug, setScanDebug] = useState<{ url: string; status?: number; sample?: string; tried?: string[] } | null>(null)
     const [showDebug, setShowDebug] = useState(false)
     const [suggestedBaseUrl, setSuggestedBaseUrl] = useState<string | null>(null)
+
+    // 测试连接状态
+    const [testing, setTesting] = useState(false)
+    const [testResult, setTestResult] = useState<TestResult | null>(null)
     const [showModelDropdown, setShowModelDropdown] = useState(false)
     const [modelSearch, setModelSearch] = useState('')
     const [editingBlueprint, setEditingBlueprint] = useState<ProtocolBlueprint | null>(null)
@@ -157,6 +162,30 @@ export default function SettingsDialog() {
             setScanError(e instanceof Error ? e.message : '未知错误')
         } finally {
             setScanning(false)
+        }
+    }
+
+    // 测试连接 (用极简对话验证)
+    const handleTestConnection = async () => {
+        if (!model) {
+            setTestResult({ success: false, error: '请先填入模型 ID' })
+            return
+        }
+        setTesting(true)
+        setTestResult(null)
+        try {
+            const r = await testConnection(blueprintId, baseUrl, apiKey, model)
+            setTestResult(r)
+            if (r.success && r.workingBaseUrl && r.workingBaseUrl !== baseUrl) {
+                setSuggestedBaseUrl(r.workingBaseUrl)
+            }
+        } catch (e) {
+            setTestResult({
+                success: false,
+                error: e instanceof Error ? e.message : '未知错误'
+            })
+        } finally {
+            setTesting(false)
         }
     }
 
@@ -363,22 +392,73 @@ export default function SettingsDialog() {
                         <div className="space-y-2">
                             <div className="flex items-center justify-between">
                                 <label className="text-sm font-medium">模型</label>
-                                <button
-                                    onClick={handleScanModels}
-                                    disabled={scanning || !currentBlueprint?.listModels?.endpoint}
-                                    className={cn(
-                                        'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all',
-                                        'bg-gradient-to-r from-primary to-purple-500 text-primary-foreground',
-                                        'hover:opacity-90 disabled:opacity-50'
-                                    )}
-                                >
-                                    {scanning ? (
-                                        <><Loader2 className="h-3 w-3 animate-spin" />扫描中...</>
-                                    ) : (
-                                        <><Search className="h-3 w-3" />扫描模型</>
-                                    )}
-                                </button>
+                                <div className="flex gap-1">
+                                    <button
+                                        onClick={handleTestConnection}
+                                        disabled={testing || !model}
+                                        className={cn(
+                                            'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all',
+                                            'border border-border bg-background hover:bg-accent disabled:opacity-50'
+                                        )}
+                                        title="用一次极简对话验证 协议+URL+Key+模型 是否能跑通"
+                                    >
+                                        {testing ? (
+                                            <><Loader2 className="h-3 w-3 animate-spin" />测试中...</>
+                                        ) : (
+                                            <><CheckCircle2Icon className="h-3 w-3" />测试连接</>
+                                        )}
+                                    </button>
+                                    <button
+                                        onClick={handleScanModels}
+                                        disabled={scanning || !currentBlueprint?.listModels?.endpoint}
+                                        className={cn(
+                                            'flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium transition-all',
+                                            'bg-gradient-to-r from-primary to-purple-500 text-primary-foreground',
+                                            'hover:opacity-90 disabled:opacity-50'
+                                        )}
+                                    >
+                                        {scanning ? (
+                                            <><Loader2 className="h-3 w-3 animate-spin" />扫描中...</>
+                                        ) : (
+                                            <><Search className="h-3 w-3" />扫描模型</>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
+
+                            {/* 测试连接结果 */}
+                            {testResult && (
+                                <div className={cn(
+                                    'flex items-start gap-2 p-2 rounded text-xs',
+                                    testResult.success
+                                        ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400'
+                                        : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                                )}>
+                                    {testResult.success ? (
+                                        <CheckCircle2Icon className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                                    ) : (
+                                        <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                                    )}
+                                    <div className="flex-1 min-w-0">
+                                        <div className="font-medium">
+                                            {testResult.success ? `✓ 连接成功 (${testResult.elapsed}ms)` : '✗ 连接失败'}
+                                        </div>
+                                        {testResult.workingBaseUrl && testResult.workingBaseUrl !== baseUrl && (
+                                            <div className="text-[11px] mt-0.5 opacity-90">
+                                                工作 URL: <code className="font-mono break-all">{testResult.workingBaseUrl}</code>
+                                            </div>
+                                        )}
+                                        {testResult.response && (
+                                            <div className="text-[11px] mt-0.5 opacity-80 break-all">
+                                                AI 回复: {testResult.response.slice(0, 100)}
+                                            </div>
+                                        )}
+                                        {testResult.error && (
+                                            <div className="text-[11px] mt-0.5 opacity-80 break-all">{testResult.error}</div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
 
                             {scanError && (
                                 <div className="space-y-1.5">

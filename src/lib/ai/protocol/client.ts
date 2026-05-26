@@ -164,13 +164,34 @@ export async function streamChatCompletion(
     }
 }
 
-// ========== 模型扫描 (基于蓝图) ==========
+// ========== 模型扫描 (并行候选探测,借鉴天命算法) ==========
+
+import {
+    generateCandidateBaseUrls,
+    isHtmlResponse,
+    STANDARD_BROWSER_HEADERS,
+    classifyHttpError
+} from './endpoint-discovery'
+
+interface SingleEndpointResult {
+    baseUrl: string
+    success: boolean
+    models: Array<{ id: string; name: string; contextLength?: number; description?: string }>
+    error?: string
+    httpStatus?: number
+}
 
 export async function listModelsByBlueprint(
     blueprint: ProtocolBlueprint,
     baseUrl: string,
     apiKey: string
-): Promise<{ success: boolean; models: Array<{ id: string; name: string; contextLength?: number; description?: string }>; error?: string; debug?: { url: string; status?: number; sample?: string }; suggestedBaseUrl?: string }> {
+): Promise<{
+    success: boolean
+    models: Array<{ id: string; name: string; contextLength?: number; description?: string }>
+    error?: string
+    debug?: { url: string; status?: number; sample?: string; tried?: string[] }
+    suggestedBaseUrl?: string
+}> {
     if (!blueprint.listModels?.endpoint) {
         return { success: false, models: [], error: '该协议未配置模型扫描端点' }
     }
@@ -179,99 +200,159 @@ export async function listModelsByBlueprint(
         return { success: false, models: [], error: '请先填入 Base URL' }
     }
 
-    // 规范化 baseUrl
-    const normalizeUrl = (u: string) => {
-        let n = u.trim()
-        if (!/^https?:\/\//.test(n)) n = 'https://' + n
-        return n.replace(/\/+$/, '')
+    // 1. 生成候选 baseURL 列表
+    const candidates = generateCandidateBaseUrls(baseUrl)
+    if (candidates.length === 0) {
+        return { success: false, models: [], error: 'URL 格式错误' }
     }
 
-    // 候选 baseUrl 列表 (按可能性排序)
-    const candidates: string[] = [normalizeUrl(baseUrl)]
-    const original = normalizeUrl(baseUrl)
+    console.log(`[scanModels] 生成 ${candidates.length} 个候选: ${candidates.join(', ')}`)
 
-    // 自动补全策略: 如果 baseUrl 不带版本号,尝试加 /v1, /api/v1, /openai/v1
-    const hasVersionSuffix = /\/v\d+(?:beta\d*)?$/.test(original) || /\/api\/v\d+/.test(original)
-    if (!hasVersionSuffix) {
-        candidates.push(`${original}/v1`)
-        candidates.push(`${original}/api/v1`)
-        candidates.push(`${original}/openai/v1`)
+    // 2. 并行扫描所有候选
+    const tasks = candidates.map(c => testSingleBaseUrl(blueprint, c, apiKey))
+    const results = await Promise.all(tasks)
+
+    // 3. 取成功结果中 model 数量最多的 (符合天命算法)
+    const successResults = results.filter(r => r.success && r.models.length > 0)
+
+    if (successResults.length === 0) {
+        // 全部失败,挑最有信息量的错误返回
+        // 优先级: 鉴权 > HTTP 错误 > 网络错误
+        const sortedFailures = results
+            .filter(r => !r.success)
+            .sort((a, b) => {
+                const score = (r: SingleEndpointResult) => {
+                    if (!r.httpStatus) return 0
+                    if (r.httpStatus === 401 || r.httpStatus === 403) return 100  // 鉴权问题最有用
+                    if (r.httpStatus === 200) return 90  // 200 但解析失败,信息也很重要
+                    if (r.httpStatus >= 400) return 50
+                    return 10
+                }
+                return score(b) - score(a)
+            })
+
+        const best = sortedFailures[0]
+        return {
+            success: false,
+            models: [],
+            error: best?.error || '所有候选端点均失败',
+            debug: {
+                url: best?.baseUrl || candidates[0],
+                status: best?.httpStatus,
+                tried: candidates
+            }
+        }
     }
 
-    // 鉴权头
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (blueprint.auth.location === 'header' && apiKey) {
-        const v = (blueprint.auth.valuePattern || '{key}').replace(/\{key\}/g, apiKey)
-        headers[blueprint.auth.name || 'Authorization'] = v
+    // 取 model 最多的
+    const winner = successResults.sort((a, b) => b.models.length - a.models.length)[0]
+    console.log(`[scanModels] ✅ 胜出端点: ${winner.baseUrl} (${winner.models.length} 个模型)`)
+
+    // 如果用户原始输入不是这个,提示采用建议
+    const userInput = baseUrl.replace(/\/+$/, '')
+    const suggestedBaseUrl = winner.baseUrl !== userInput ? winner.baseUrl : undefined
+
+    return {
+        success: true,
+        models: winner.models,
+        suggestedBaseUrl
+    }
+}
+
+/**
+ * 测试单个候选 baseURL
+ */
+async function testSingleBaseUrl(
+    blueprint: ProtocolBlueprint,
+    baseUrl: string,
+    apiKey: string
+): Promise<SingleEndpointResult> {
+    if (!blueprint.listModels?.endpoint) {
+        return { baseUrl, success: false, models: [], error: '协议未配置 listModels' }
+    }
+
+    const url = renderUrl(blueprint.listModels.endpoint, { baseUrl, key: apiKey })
+
+    // 构建鉴权头 (带浏览器伪装,避免 WAF)
+    const headers: Record<string, string> = {
+        ...STANDARD_BROWSER_HEADERS,
+        'Content-Type': 'application/json'
+    }
+
+    // 同时尝试 Authorization: Bearer 和 X-Api-Key (天命策略)
+    if (apiKey) {
+        if (blueprint.auth.location === 'header') {
+            const v = (blueprint.auth.valuePattern || '{key}').replace(/\{key\}/g, apiKey)
+            headers[blueprint.auth.name || 'Authorization'] = v
+            // 双保险: 也加上 X-Api-Key (中转服务有的认这个)
+            if (blueprint.auth.name !== 'X-Api-Key' && blueprint.auth.name !== 'x-api-key') {
+                headers['X-Api-Key'] = apiKey
+            }
+        }
     }
     if (blueprint.auth.extra) Object.assign(headers, blueprint.auth.extra)
 
-    let lastError = ''
-    let lastDebug: { url: string; status?: number; sample?: string } | undefined
-
-    for (const candidate of candidates) {
-        const url = renderUrl(blueprint.listModels.endpoint, { baseUrl: candidate, key: apiKey })
-        let finalUrl = url
-        if (blueprint.auth.location === 'query' && apiKey) {
-            const sep = url.includes('?') ? '&' : '?'
-            finalUrl = `${url}${sep}${blueprint.auth.name || 'key'}=${encodeURIComponent(apiKey)}`
-        }
-
-        console.log(`[scanModels] 尝试 URL: ${finalUrl.replace(/key=[^&]+/, 'key=***')}`)
-
-        try {
-            const text = await sendRequest(finalUrl, 'GET', headers, null)
-
-            // 检查响应是否是 HTML (说明走错路径,落到前端页面了)
-            const trimmed = text.trim().slice(0, 100).toLowerCase()
-            if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html') || trimmed.includes('<head')) {
-                lastError = `端点返回的是 HTML 页面而不是 JSON,可能是路径错误`
-                lastDebug = { url: finalUrl, sample: text.slice(0, 200) }
-                console.log(`[scanModels] 跳过 (HTML 响应): ${candidate}`)
-                continue  // 试下一个候选
-            }
-
-            let data: unknown
-            try {
-                data = JSON.parse(text)
-            } catch {
-                lastError = '响应不是合法 JSON'
-                lastDebug = { url: finalUrl, sample: text.slice(0, 300) }
-                continue
-            }
-
-            const models = blueprint.listModels.extractor
-                ? blueprint.listModels.extractor(data)
-                : (blueprint.schema ? extractModelsFromResponse(data, blueprint.schema) : [])
-
-            if (models.length === 0) {
-                lastError = `成功响应但解析到 0 个模型 (路径: ${blueprint.schema?.modelListPath || 'data'})`
-                lastDebug = { url: finalUrl, sample: JSON.stringify(data).slice(0, 500) }
-                continue
-            }
-
-            console.log(`[scanModels] ✅ 成功扫描到 ${models.length} 个模型 from ${candidate}`)
-
-            // 如果用了非用户输入的候选 baseUrl,告诉用户应该改
-            const suggestedBaseUrl = candidate !== original ? candidate : undefined
-
-            return { success: true, models, suggestedBaseUrl }
-        } catch (e) {
-            lastError = e instanceof Error ? e.message : '请求失败'
-            lastDebug = { url: finalUrl }
-            console.log(`[scanModels] 失败: ${lastError}`)
-            // 鉴权错误立即停止 (key 不对再试也没用)
-            if (lastError.includes('401') || lastError.includes('鉴权失败')) {
-                break
-            }
-        }
+    let finalUrl = url
+    if (blueprint.auth.location === 'query' && apiKey) {
+        const sep = url.includes('?') ? '&' : '?'
+        finalUrl = `${url}${sep}${blueprint.auth.name || 'key'}=${encodeURIComponent(apiKey)}`
     }
 
-    return {
-        success: false,
-        models: [],
-        error: lastError || '所有候选端点均失败',
-        debug: lastDebug
+    try {
+        const text = await sendRequest(finalUrl, 'GET', headers, null)
+
+        // HTML 响应 = 走错路径,落到前端页面
+        if (isHtmlResponse(text)) {
+            return {
+                baseUrl,
+                success: false,
+                models: [],
+                error: '端点返回 HTML (前端页面),非 API',
+                httpStatus: 200
+            }
+        }
+
+        let data: unknown
+        try {
+            data = JSON.parse(text)
+        } catch {
+            return {
+                baseUrl,
+                success: false,
+                models: [],
+                error: '响应不是 JSON',
+                httpStatus: 200
+            }
+        }
+
+        const models = blueprint.listModels.extractor
+            ? blueprint.listModels.extractor(data)
+            : (blueprint.schema ? extractModelsFromResponse(data, blueprint.schema) : [])
+
+        if (models.length === 0) {
+            return {
+                baseUrl,
+                success: false,
+                models: [],
+                error: '响应有效但解析到 0 个模型',
+                httpStatus: 200
+            }
+        }
+
+        return { baseUrl, success: true, models }
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : '请求失败'
+        // 提取 HTTP 状态码
+        const statusMatch = msg.match(/HTTP (\d{3})/)
+        const status = statusMatch ? parseInt(statusMatch[1]) : undefined
+
+        return {
+            baseUrl,
+            success: false,
+            models: [],
+            error: msg,
+            httpStatus: status
+        }
     }
 }
 
