@@ -283,11 +283,72 @@ export const PRESET_MISTRAL: ProtocolBlueprint = {
     }
 }
 
+// ========== OpenAI Responses (Codex 风格) ==========
+
+/**
+ * OpenAI Responses API - 用于 Codex / o1 / GPT-5 等 Reasoning 模型
+ */
+export const PRESET_OPENAI_RESPONSES: ProtocolBlueprint = {
+    id: 'openai-responses',
+    name: 'OpenAI Responses (Codex/o1)',
+    description: 'OpenAI 新版 Responses API,用于 Codex / o1 / GPT-5 等推理模型,使用 /responses 端点',
+    icon: '🧬',
+    builtIn: true,
+    defaultBaseUrl: '',
+    auth: {
+        location: 'header',
+        name: 'Authorization',
+        valuePattern: 'Bearer {key}'
+    },
+    chatEndpoint: '{baseUrl}/responses',
+    listModels: {
+        endpoint: '{baseUrl}/models'
+    },
+    schema: {
+        messageFormat: 'openai',
+        fieldMap: {
+            messages: 'input'
+        },
+        responsePath: 'output.0.content.0.text',
+        streamChunkPath: 'delta',
+        modelListPath: 'data',
+        modelIdField: 'id'
+    }
+}
+
+// ========== NewAPI Codex 风格 ==========
+
+export const PRESET_NEWAPI_CODEX: ProtocolBlueprint = {
+    id: 'newapi-codex',
+    name: 'NewAPI Codex 中转 (Codex 风格)',
+    description: 'NewAPI/OneAPI 开启 Codex 模式后的中转,只暴露 /responses 端点 (如 sharedchat.cc/codex)',
+    icon: '🔬',
+    builtIn: true,
+    defaultBaseUrl: '',
+    auth: {
+        location: 'header',
+        name: 'Authorization',
+        valuePattern: 'Bearer {key}'
+    },
+    chatEndpoint: '{baseUrl}/responses',
+    listModels: undefined,
+    schema: {
+        messageFormat: 'openai',
+        fieldMap: {
+            messages: 'input'
+        },
+        responsePath: 'output.0.content.0.text',
+        streamChunkPath: 'delta',
+    }
+}
+
 // ========== 完整列表 ==========
 
 export const ALL_PRESETS: ProtocolBlueprint[] = [
     PRESET_OPENAI,
     PRESET_NEWAPI,
+    PRESET_NEWAPI_CODEX,
+    PRESET_OPENAI_RESPONSES,
     PRESET_ANTHROPIC,
     PRESET_GEMINI,
     PRESET_OLLAMA,
